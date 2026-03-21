@@ -1,0 +1,30 @@
+extends: ../default.yaml
+
+experiment:
+  name: s4_overtake_interaction
+
+simulation:
+  steps: 190
+  target_speed: 9.0
+
+scenario:
+  goal_x: 110.0
+  road:
+    length: 160.0
+  obstacles:
+    - obstacle_id: slow_lead
+      motion_model: constant_velocity
+      x: 22.0
+      y: 0.0
+      yaw: 0.0
+      speed: 2.0
+      length: 4.8
+      width: 2.0
+    - obstacle_id: side_block
+      motion_model: constant_velocity
+      x: 36.0
+      y: 1.8
+      yaw: 0.0
+      speed: 4.2
+      length: 4.6
+      width: 2.0

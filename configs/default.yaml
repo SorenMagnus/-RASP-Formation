@@ -1,0 +1,86 @@
+experiment:
+  name: phase_a_default
+  output_root: outputs
+  save_traj: true
+
+simulation:
+  dt: 0.1
+  steps: 120
+  wheelbase: 2.8
+  target_speed: 8.0
+  bounds:
+    accel: [-2.5, 2.0]
+    steer_deg: [-25.0, 25.0]
+    speed: [0.0, 12.0]
+
+controller:
+  kind: adaptive_apf
+  vehicle_length: 4.8
+  vehicle_width: 1.9
+  speed_gain: 0.8
+  gap_gain: 0.35
+  lateral_gain: 0.22
+  heading_gain: 0.65
+  attraction_gain: 1.15
+  repulsive_gain: 14.0
+  road_gain: 8.0
+  formation_gain: 1.2
+  consensus_gain: 0.25
+  obstacle_influence_distance: 15.0
+  vehicle_influence_distance: 10.0
+  road_influence_margin: 1.2
+  st_velocity_gain: 0.7
+  ttc_gain: 0.8
+  ttc_threshold: 4.0
+  risk_distance_scale: 12.0
+  risk_speed_scale: 4.0
+  risk_ttc_threshold: 5.0
+  risk_sigmoid_slope: 4.0
+  risk_reference: 0.45
+  adaptive_alpha: 1.2
+  repulsive_gain_bounds: [8.0, 32.0]
+  road_gain_bounds: [3.0, 15.0]
+  stagnation_speed_threshold: 0.4
+  stagnation_progress_threshold: 0.03
+  stagnation_force_threshold: 0.5
+  stagnation_steps: 6
+  stagnation_cooldown_steps: 5
+
+safety:
+  enabled: true
+  solver: osqp
+  safe_distance: 0.5
+  barrier_decay: 3.0
+  slack_penalty: 1200.0
+  max_slack: 2.0
+  road_boundary_margin: 0.15
+  fallback_brake: 2.5
+  fallback_steer_gain: 0.45
+
+decision:
+  kind: fsm
+  default_mode: topology=line|behavior=follow|gain=nominal
+  hysteresis_steps: 3
+  risk_threshold_enter: 0.55
+  risk_threshold_exit: 0.30
+  clearance_threshold: 8.0
+  ttc_threshold: 4.0
+  boundary_margin_threshold: 0.75
+  lookahead_distance: 18.0
+  narrow_passage_margin: 0.5
+  stagnation_speed_threshold: 0.45
+  stagnation_progress_threshold: 0.2
+  stagnation_steps: 6
+
+scenario:
+  vehicle_count: 3
+  spacing: 8.0
+  spawn_jitter_std: 0.05
+  initial_speed: 5.0
+  goal_x: 80.0
+  goal_tolerance: 0.5
+  road:
+    length: 120.0
+    lane_center_y: 0.0
+    half_width: 3.5
+  obstacles: []

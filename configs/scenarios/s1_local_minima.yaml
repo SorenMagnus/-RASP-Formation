@@ -1,0 +1,31 @@
+extends: ../default.yaml
+
+experiment:
+  name: s1_local_minima
+
+simulation:
+  steps: 220
+
+scenario:
+  goal_x: 95.0
+  road:
+    length: 140.0
+  obstacles:
+    - obstacle_id: lm_upper
+      motion_model: static
+      x: 27.0
+      y: 2.75
+      length: 4.5
+      width: 1.2
+    - obstacle_id: lm_lower
+      motion_model: static
+      x: 30.5
+      y: -2.75
+      length: 4.5
+      width: 1.2
+    - obstacle_id: lm_front
+      motion_model: static
+      x: 41.5
+      y: 2.4
+      length: 4.2
+      width: 1.0

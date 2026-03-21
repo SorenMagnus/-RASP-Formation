@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this APF-LF research artifact, please cite it using the metadata below."
+title: "APF-LF Research Artifact"
+version: 0.1.0
+date-released: 2026-03-20
+license: MIT
+authors:
+  - name: "APF-LF Research Artifact Contributors"
+abstract: >-
+  Deterministic multi-vehicle formation simulation artifact with APF-family
+  controllers, FSM mode decision, CBF-QP safety filtering, replay support,
+  and paper-style statistics and export tooling.
+keywords:
+  - formation control
+  - motion planning
+  - artificial potential field
+  - control barrier function
+  - reproducibility

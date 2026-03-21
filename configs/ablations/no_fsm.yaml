@@ -1,0 +1,3 @@
+decision:
+  kind: static
+  default_mode: topology=line|behavior=follow|gain=nominal

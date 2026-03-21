@@ -1,0 +1,25 @@
+extends: ../default.yaml
+
+experiment:
+  name: s3_narrow_passage
+
+simulation:
+  steps: 200
+
+scenario:
+  goal_x: 105.0
+  road:
+    length: 150.0
+  obstacles:
+    - obstacle_id: passage_block_1
+      motion_model: static
+      x: 44.0
+      y: -1.10
+      length: 6.0
+      width: 2.5
+    - obstacle_id: passage_block_2
+      motion_model: static
+      x: 52.0
+      y: -1.00
+      length: 6.0
+      width: 2.5

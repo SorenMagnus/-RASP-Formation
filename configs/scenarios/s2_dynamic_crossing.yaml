@@ -1,0 +1,29 @@
+extends: ../default.yaml
+
+experiment:
+  name: s2_dynamic_crossing
+
+simulation:
+  steps: 180
+
+scenario:
+  goal_x: 95.0
+  road:
+    length: 140.0
+  obstacles:
+    - obstacle_id: cross_up
+      motion_model: constant_velocity
+      x: 42.0
+      y: 7.0
+      yaw: -1.5707963268
+      speed: 2.6
+      length: 4.4
+      width: 2.0
+    - obstacle_id: cross_down
+      motion_model: constant_velocity
+      x: 52.0
+      y: -7.0
+      yaw: 1.5707963268
+      speed: 2.2
+      length: 4.4
+      width: 2.0

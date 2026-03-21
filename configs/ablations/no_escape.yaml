@@ -1,0 +1,5 @@
+controller:
+  stagnation_steps: 9999
+  stagnation_cooldown_steps: 0
+decision:
+  stagnation_steps: 9999
