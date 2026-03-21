@@ -458,6 +458,12 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
                 "decision.stagnation_steps",
             )
         ),
+        recover_exit_steps=int(
+            _require_positive(
+                float(raw.get("recover_exit_steps", 4)),
+                "decision.recover_exit_steps",
+            )
+        ),
     )
 
 

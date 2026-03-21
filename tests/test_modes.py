@@ -17,7 +17,7 @@ from apflf.utils.types import (
 )
 
 
-def _decision_config(*, hysteresis_steps: int = 2, stagnation_steps: int = 4) -> DecisionConfig:
+def _decision_config(*, hysteresis_steps: int = 2, stagnation_steps: int = 4, recover_exit_steps: int = 4) -> DecisionConfig:
     return DecisionConfig(
         kind="fsm",
         default_mode=DEFAULT_MODE_LABEL,
@@ -32,6 +32,7 @@ def _decision_config(*, hysteresis_steps: int = 2, stagnation_steps: int = 4) ->
         stagnation_speed_threshold=0.45,
         stagnation_progress_threshold=0.1,
         stagnation_steps=stagnation_steps,
+        recover_exit_steps=recover_exit_steps,
     )
 
 
@@ -315,6 +316,189 @@ def test_fsm_keeps_recover_active_until_team_recenters() -> None:
 
     assert parse_mode_label(recover_mode).behavior == "recover_right"
 
+
+def test_fsm_recover_exit_requires_sustained_satisfaction() -> None:
+    """recover→follow 退出需要恢复条件连续满足 N_exit 步。
+
+    如果恢复条件仅满足 1 步就被违背，则 recover 不应退出。
+    """
+    recover_exit_steps = 3
+    decision = FSMModeDecision(
+        config=_decision_config(hysteresis_steps=1, recover_exit_steps=recover_exit_steps),
+        vehicle_length=4.8,
+        vehicle_width=1.9,
+        safe_distance=0.5,
+    )
+
+    road = RoadGeometry(length=120.0, lane_center_y=0.0, half_width=3.5)
+    # 1. 先把 FSM 推入 yield 模式
+    hazard_obs = Observation(
+        step_index=0,
+        time=0.0,
+        states=(
+            State(x=22.0, y=0.0, yaw=0.0, speed=5.0),
+            State(x=10.0, y=0.0, yaw=0.0, speed=4.5),
+            State(x=-2.0, y=0.0, yaw=0.0, speed=4.0),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("upper", 27.0, 2.75, 0.0, 0.0, 4.5, 1.2),
+            ObstacleState("lower", 30.5, -2.75, 0.0, 0.0, 4.5, 1.2),
+        ),
+    )
+    decision.select_mode(hazard_obs)
+    yield_mode = decision.select_mode(hazard_obs)
+    assert parse_mode_label(yield_mode).behavior == "yield_right"
+
+    # 2. 推入 recover 模式：queued offset 大，无前方障碍
+    still_offset_obs = Observation(
+        step_index=1,
+        time=0.1,
+        states=(
+            State(x=46.0, y=-1.4, yaw=0.0, speed=4.2),
+            State(x=38.0, y=-1.6, yaw=0.0, speed=4.0),
+            State(x=30.0, y=-1.5, yaw=0.0, speed=3.8),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=hazard_obs.desired_offsets,
+        obstacles=(),
+    )
+    decision.select_mode(still_offset_obs)
+    recover_mode = decision.select_mode(still_offset_obs)
+    assert parse_mode_label(recover_mode).behavior == "recover_right"
+
+    # 3. 恢复完成条件满足的观测：编队靠近中心线、队友不落后
+    recovered_obs = Observation(
+        step_index=2,
+        time=0.2,
+        states=(
+            State(x=60.0, y=-0.05, yaw=0.0, speed=5.0),
+            State(x=52.0, y=-0.05, yaw=0.0, speed=5.0),
+            State(x=44.0, y=-0.05, yaw=0.0, speed=5.0),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=hazard_obs.desired_offsets,
+        obstacles=(),
+    )
+
+    # 喂 1 步恢复完成的观测
+    mode_1 = decision.select_mode(recovered_obs)
+    # 应该仍在 recover（连续满足不够）
+    assert parse_mode_label(mode_1).behavior.startswith("recover_"), \
+        f"Expected recover after 1 satisfied step, got {mode_1}"
+
+    # 打断：再喂一步仍需恢复的观测
+    still_offset_obs2 = Observation(
+        step_index=3,
+        time=0.3,
+        states=(
+            State(x=64.0, y=-1.4, yaw=0.0, speed=4.2),
+            State(x=56.0, y=-1.6, yaw=0.0, speed=4.0),
+            State(x=48.0, y=-1.5, yaw=0.0, speed=3.8),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=hazard_obs.desired_offsets,
+        obstacles=(),
+    )
+    mode_interrupted = decision.select_mode(still_offset_obs2)
+    assert parse_mode_label(mode_interrupted).behavior.startswith("recover_"), \
+        "Expected recover to stay after interruption"
+
+    # 重新连续恢复 N_exit 步
+    for step_i in range(recover_exit_steps):
+        mode_n = decision.select_mode(recovered_obs)
+        if step_i < recover_exit_steps - 1:
+            # 还在 recover（连续满足不够）
+            assert parse_mode_label(mode_n).behavior.startswith("recover_"), \
+                f"Expected recover at step {step_i+1}/{recover_exit_steps}, got {mode_n}"
+
+    # 最后一步应该允许退出 recover（可能需要再经过 hysteresis）
+    # 由于 hysteresis_steps=1 且 risk 已低于 exit，应该会回到 follow
+    final_mode = decision.select_mode(recovered_obs)
+    parsed_final = parse_mode_label(final_mode)
+    assert parsed_final.behavior == "follow", \
+        f"Expected follow after {recover_exit_steps} sustained steps, got {final_mode}"
+
+
+def test_fsm_recover_exits_after_consecutive_satisfaction() -> None:
+    """recover 退出迟滞：恢复条件连续满足 recover_exit_steps 步后立即退出。"""
+    recover_exit_steps = 2
+    decision = FSMModeDecision(
+        config=_decision_config(hysteresis_steps=1, recover_exit_steps=recover_exit_steps),
+        vehicle_length=4.8,
+        vehicle_width=1.9,
+        safe_distance=0.5,
+    )
+
+    road = RoadGeometry(length=120.0, lane_center_y=0.0, half_width=3.5)
+    # 先推入 yield
+    hazard_obs = Observation(
+        step_index=0,
+        time=0.0,
+        states=(
+            State(x=22.0, y=0.0, yaw=0.0, speed=5.0),
+            State(x=10.0, y=0.0, yaw=0.0, speed=4.5),
+            State(x=-2.0, y=0.0, yaw=0.0, speed=4.0),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("upper", 27.0, 2.75, 0.0, 0.0, 4.5, 1.2),
+            ObstacleState("lower", 30.5, -2.75, 0.0, 0.0, 4.5, 1.2),
+        ),
+    )
+    decision.select_mode(hazard_obs)
+    decision.select_mode(hazard_obs)
+
+    # 推入 recover
+    offset_obs = Observation(
+        step_index=1,
+        time=0.1,
+        states=(
+            State(x=46.0, y=-1.4, yaw=0.0, speed=4.2),
+            State(x=38.0, y=-1.6, yaw=0.0, speed=4.0),
+            State(x=30.0, y=-1.5, yaw=0.0, speed=3.8),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=hazard_obs.desired_offsets,
+        obstacles=(),
+    )
+    decision.select_mode(offset_obs)
+    recover_mode = decision.select_mode(offset_obs)
+    assert parse_mode_label(recover_mode).behavior.startswith("recover_")
+
+    # 恢复完成的观测
+    ok_obs = Observation(
+        step_index=2,
+        time=0.2,
+        states=(
+            State(x=60.0, y=-0.05, yaw=0.0, speed=5.0),
+            State(x=52.0, y=-0.05, yaw=0.0, speed=5.0),
+            State(x=44.0, y=-0.05, yaw=0.0, speed=5.0),
+        ),
+        road=road,
+        goal_x=95.0,
+        desired_offsets=hazard_obs.desired_offsets,
+        obstacles=(),
+    )
+
+    # 第 1 步满足：仍在 recover
+    m1 = decision.select_mode(ok_obs)
+    assert parse_mode_label(m1).behavior.startswith("recover_")
+
+    # 第 2 步满足：现在允许退出
+    m2 = decision.select_mode(ok_obs)
+    # 此时 candidate 应已不是 recover，加上 hysteresis_steps=1，可能还需 1 步
+    m3 = decision.select_mode(ok_obs)
+    assert parse_mode_label(m3).behavior == "follow", \
+        f"Expected follow after {recover_exit_steps} sustained recovery steps, got {m3}"
 
 
 

@@ -71,6 +71,7 @@ decision:
   stagnation_speed_threshold: 0.45
   stagnation_progress_threshold: 0.2
   stagnation_steps: 6
+  recover_exit_steps: 4
 
 scenario:
   vehicle_count: 3

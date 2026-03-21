@@ -53,6 +53,9 @@ class FSMModeDecision(ModeDecisionModule):
         self._leader_x_history: deque[float] = deque(maxlen=config.stagnation_steps + 1)
         self._locked_side: str | None = None
         self._hazard_memory_active = False
+        # recover 退出迟滞计数器：recovery-complete 条件必须连续满足
+        # N_exit 步才允许退出 recover 模式，防止 seed1 类场景过早退出
+        self._recover_exit_count: int = 0
 
     def select_mode(self, observation: Observation) -> str:
         """Select a discrete topology/behavior/gain mode."""
@@ -100,6 +103,8 @@ class FSMModeDecision(ModeDecisionModule):
             )
 
         if self._hazard_memory_active and hazard.needs_recovery:
+            # 仍需恢复，重置退出计数器
+            self._recover_exit_count = 0
             self._locked_side = preferred_side
             return compose_mode_label(
                 topology="line",
@@ -107,9 +112,29 @@ class FSMModeDecision(ModeDecisionModule):
                 gain="nominal",
             )
 
+        # 恢复条件已满足（needs_recovery == False），但仍在 hazard_memory
+        # 检查是否为 recover 模式的退出迟滞
+        if (
+            self._hazard_memory_active
+            and current_mode.behavior.startswith("recover_")
+        ):
+            # 恢复条件已满足，累加退出计数器
+            self._recover_exit_count += 1
+            if self._recover_exit_count < self.config.recover_exit_steps:
+                # 还未达到连续满足步数要求，继续保持 recover 模式
+                self._locked_side = preferred_side
+                return compose_mode_label(
+                    topology="line",
+                    behavior=f"recover_{preferred_side}",
+                    gain="nominal",
+                )
+            # 连续满足 N_exit 步，允许退出 recover
+            self._recover_exit_count = 0
+
         if hazard.risk_score <= self.config.risk_threshold_exit and not hazard.narrow_passage:
             self._locked_side = None
             self._hazard_memory_active = False
+            self._recover_exit_count = 0
             return self._default_mode
 
         return current_mode.to_label()

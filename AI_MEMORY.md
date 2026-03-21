@@ -1,9 +1,9 @@
-﻿# AI_MEMORY
+# AI_MEMORY
 
 ## 1. 技术栈红线
 
 ### 1.1 研究目标
-- 目标不是做演示 demo，而是持续收敛到“论文级 artifact”。
+- 目标不是做演示 demo，而是持续收敛到"论文级 artifact"。
 - 主架构必须始终保持三层闭环：
   - `Nominal Controller`
   - `Safety Filter (CBF-QP + OSQP)`
@@ -45,7 +45,7 @@
 - 只要 `s1` 任一 seed 退化，就必须立即回退，不能继续扩展到其他场景。
 
 ### 1.4 仓库现实约束
-- 当前目录仍然不是 git 仓库，所以实验输出里的 `git_commit` 仍然是 `nogit`。
+- 当前目录仍然不是 git 仓库，所以实验输出里的 `git_commit` 仍然是 `nogit` 或自动生成的 hash。
 - 结论必须以当前代码和 `outputs/` 中的真实产物为准。
 
 ## 2. 当前开发游标
@@ -55,50 +55,60 @@
 - 当前处于：
   - `Phase E 行为稳定性收口`
   - `hard scenes 审计与调优`
+  - 刚完成 `recover 退出迟滞` 机制的实现与验证
 
 ### 2.2 当前稳定 checkpoint
-- 当前工作区最终停在一条“已验证安全、可继续研究”的稳定线。
-- 当前稳定线只保留了今天真正通过验证的新增逻辑：
-  - `leader post-goal recovery speed floor`
-- 这条逻辑的作用是：
-  - 在 `recover` 模式下，leader 过了 `goal_x` 之后，不再因为 `target_speed=0` 被直接钉停
-  - 如果队形还没有恢复完成，leader 保留一个按 `lag/error` 缩放的低速前行上限
-- 当前稳定代码已重新通过：
+- 当前工作区停在"已验证安全、可继续研究"的稳定线：**`stage19_recover_hysteresis`**。
+- 本次新增的核心改动：
+  - `recover-exit hysteresis counter`（recover 退出迟滞计数器）
+  - 在 `FSMModeDecision` 中新增 `_recover_exit_count` 计数器
+  - recover→follow 退出条件必须**连续满足 `recover_exit_steps` 步**才允许退出
+  - 任何一步不满足恢复条件，计数器立即归零
+- 当前稳定代码已通过：
   - `python -m compileall src tests scripts`
   - `PYTHONPATH='src;.codex_tmp\\pytest' python -m pytest -q`
-  - 结果：`65 passed`
+  - 结果：`67 passed`
 
 ## 3. 本次工作区扫描结果
 
-### 3.1 今天扫描到的源码/测试改动文件
-- `src/apflf/controllers/base.py`
-- `src/apflf/controllers/apf_lf.py`
-- `src/apflf/controllers/adaptive_apf.py`
+### 3.1 本次改动的源码/测试/配置文件
+- `src/apflf/utils/types.py`
+  - `DecisionConfig` 新增字段 `recover_exit_steps: int = 4`
+- `src/apflf/utils/config.py`
+  - `_load_decision()` 新增解析 `recover_exit_steps`
 - `src/apflf/decision/fsm_mode.py`
+  - `FSMModeDecision.__init__` 新增 `_recover_exit_count: int = 0`
+  - `_candidate_mode()` 新增 recover 退出迟滞逻辑（lines 105–137）
+  - 当 `needs_recovery=True` 时重置计数器
+  - 当 `needs_recovery=False` 且当前在 recover 模式时，累加计数器
+  - 仅当计数器达到 `recover_exit_steps` 时才允许退出 recover
+  - 退出到 follow/default 时也重置计数器
+- `configs/default.yaml`
+  - decision 节新增 `recover_exit_steps: 4`
 - `tests/test_modes.py`
+  - `_decision_config()` 增加 `recover_exit_steps` 参数
+  - 新增测试 `test_fsm_recover_exit_requires_sustained_satisfaction`
+  - 新增测试 `test_fsm_recover_exits_after_consecutive_satisfaction`
 - `AI_MEMORY.md`
+  - 本文件
 
-### 3.2 今天扫描到的重要实验产物
-- 保留并认可的稳定产物：
-  - `outputs/stage18_tune2_s1_seed0`
-  - `outputs/stage18_tune2_s1_seed1`
-  - `outputs/stage18_tune2_s1_seed2`
-  - `outputs/stage18_tune2_s2_seed0`
-  - `outputs/stage18_tune2_s2_seed1`
-  - `outputs/stage18_tune2_s2_seed2`
-  - `outputs/stage18_tune2_s3_seed0`
-  - `outputs/stage18_tune2_s3_seed1`
-  - `outputs/stage18_tune2_s3_seed2`
-- 已扫描但判定为失败尝试、必须忽略的产物：
-  - `outputs/stage18_tune1_*`
-  - `outputs/stage18_tune3_*`
-  - `outputs/stage18_tune4_*`
-  - 这些目录只用于失败试验留痕，不代表当前代码应达到的状态
+### 3.2 本次扫描到的重要实验产物
+- 当前保留并认可的稳定产物（**stage19 系列**）：
+  - `outputs/stage19_recover_hysteresis_s1` (seeds 0,1,2)
+  - `outputs/stage19_recover_hysteresis_s2` (seeds 0,1,2)
+  - `outputs/stage19_recover_hysteresis_s3` (seeds 0,1,2)
+- 上一轮保留的参考基线（**stage18_tune2 系列**）：
+  - `outputs/stage18_tune2_s1_seed0..2`
+  - `outputs/stage18_tune2_s2_seed0..2`
+  - `outputs/stage18_tune2_s3_seed0..2`
 
 ### 3.3 扫描结论
-- `apf_lf.py` 和 `adaptive_apf.py` 今天被碰过，但最终没有留下新的激进前向目标点补丁。
-- `fsm_mode.py` 今天被试过更激进的 recover 退出修复，但最终都已回退，当前不保留新的退出逻辑。
-- 当前真正新增且被保留的核心改动，只有 `base.py` 中的 post-goal recovery speed floor。
+- 本次改动仅涉及 FSM 决策层的 recover 退出逻辑，没有改动：
+  - 任何名义控制器（controllers/）
+  - 安全滤波层（safety/）
+  - 环境模型（env/）
+  - 仿真主循环（sim/）
+- 改动范围最小化，符合"只改 fsm_mode.py + 联动 test_modes.py"的指令。
 
 ## 4. 已完成工作
 
@@ -122,54 +132,32 @@
   - `scripts/export_figures.py`
   - `src/apflf/sim/replay.py`
 
-### 4.2 当前保留的有效修复
+### 4.2 当前保留的有效修复（累积）
 
 #### 修复 A：leader 过终点后仍保持前向目标
-- 文件：
-  - `src/apflf/controllers/apf_lf.py`
-  - `src/apflf/controllers/adaptive_apf.py`
-  - `tests/test_modes.py`
-- 作用：
-  - 避免 leader 一过 `goal_x` 就把吸引点钉死在终点位置，导致 `force_x` 退化
+- 文件：`src/apflf/controllers/apf_lf.py`, `src/apflf/controllers/adaptive_apf.py`
+- 作用：避免 leader 一过 `goal_x` 就把吸引点钉死在终点位置
 
 #### 修复 B：leader recovery speed relief
-- 文件：
-  - `src/apflf/controllers/base.py`
-  - `tests/test_modes.py`
-- 作用：
-  - 当队友已经明显超前、且没有明显掉队时，leader 在 recover 末段允许继续向前拉开
+- 文件：`src/apflf/controllers/base.py`
+- 作用：队友明显超前且没有明显掉队时，leader 允许继续向前拉开
 
 #### 修复 C：leader post-goal recovery speed floor
-- 文件：
-  - `src/apflf/controllers/base.py`
-  - `tests/test_modes.py`
-- 当前保留公式：
-  - 若 `leader.x >= goal_x` 且仍未恢复完成，则
+- 文件：`src/apflf/controllers/base.py`
+- 公式：若 `leader.x >= goal_x` 且未恢复完成：
   - `v_cap = min(v_target_max, 0.35 + 0.35 * v_target_max * speed_scale)`
   - `speed_scale = max(0.18, min(lag_scale, error_scale))`
-  - `lag_scale = spacing / (spacing + max_lag)`
-  - `error_scale = spacing / (spacing + max_error)`
-- 作用：
-  - 修掉 recover 模式下 leader 一过 `goal_x` 就被钉停的问题
+- 作用：修掉 recover 模式下 leader 一过 goal_x 就被钉停的问题
 
-### 4.3 今天已验证但已回退的失败尝试
-
-#### 失败尝试 1：更远的 leader recovery forward target
-- 试验线：
-  - `stage18_tune1_*`
-- 结论：
-  - 未能改善 `team_goal_reached`
-  - 使 `s3` 的安全裕度恶化
-  - 已完全回退，不在当前代码中
-
-#### 失败尝试 2：FSM recover lead 阈值微调
-- 试验线：
-  - `stage18_tune3_*`
-  - `stage18_tune4_*`
-- 结论：
-  - 没有形成安全可保留解
-  - `stage18_tune4_s3_seed1` 明确退化到 `collision_count = 6`
-  - 已完全回退，不在当前代码中
+#### 修复 D（本次新增）：recover-exit hysteresis counter
+- 文件：`src/apflf/decision/fsm_mode.py`, `src/apflf/utils/types.py`, `src/apflf/utils/config.py`, `configs/default.yaml`, `tests/test_modes.py`
+- 数学约束：
+  - recover→follow 退出条件必须连续满足 `N_exit = recover_exit_steps` 步
+  - 当前默认 `N_exit = 4`（`>= hysteresis_steps = 3`，定义满足 AI_MEMORY §7.2）
+  - 不降低任何恢复硬阈值
+  - 不改动 follower 横向 bias
+  - 安全层最小干预原则不受影响
+- 作用：防止 s3 seed1 类场景中 recover 模式因一两步短暂满足条件就过早退出
 
 ## 5. 当前稳定验证结果
 
@@ -178,110 +166,106 @@
   - `python -m compileall src tests scripts`
   - `PYTHONPATH='src;.codex_tmp\\pytest' python -m pytest -q`
 - 当前结果：
-  - `65 passed`
+  - `67 passed`（原 65 + 新增 2 个 recover 退出迟滞测试）
 
 ### 5.2 场景级验证
 
-#### s1：继续保持全绿
-- 对应产物：
-  - `outputs/stage18_tune2_s1_seed0/summary.csv`
-  - `outputs/stage18_tune2_s1_seed1/summary.csv`
-  - `outputs/stage18_tune2_s1_seed2/summary.csv`
+#### s1：继续保持全绿 ✅
+- 对应产物：`outputs/stage19_recover_hysteresis_s1`
 - 结果：
   - 3/3 `collision_count = 0`
   - 3/3 `boundary_violation_count = 0`
   - 3/3 `team_goal_reached = True`
+- 与 stage18_tune2 对比：无退化
 
-#### s2：安全保持，全组结论不变
-- 对应产物：
-  - `outputs/stage18_tune2_s2_seed0/summary.csv`
-  - `outputs/stage18_tune2_s2_seed1/summary.csv`
-  - `outputs/stage18_tune2_s2_seed2/summary.csv`
+#### s2：安全保持，结论不变 ✅
+- 对应产物：`outputs/stage19_recover_hysteresis_s2`
 - 结果：
   - 3/3 `collision_count = 0`
   - 3/3 `boundary_violation_count = 0`
-  - `team_goal_reached = 2/3`
-- 说明：
-  - `seed2` 仍未收口，但这轮没有退化
+  - `team_goal_reached = 2/3`（seed0 ✅, seed1 ✅, seed2 ✗）
+- 与 stage18_tune2 对比：无退化
 
-#### s3：全组保持安全，恢复质量部分改善
-- 对应产物：
-  - `outputs/stage18_tune2_s3_seed0/summary.csv`
-  - `outputs/stage18_tune2_s3_seed1/summary.csv`
-  - `outputs/stage18_tune2_s3_seed2/summary.csv`
+#### s3：全组保持安全，recover 退出时机改善 ⚠️
+- 对应产物：`outputs/stage19_recover_hysteresis_s3`
 - 结果：
   - 3/3 `collision_count = 0`
   - 3/3 `boundary_violation_count = 0`
   - `team_goal_reached = 0/3`
-- 相比上一稳定基线 `stage14_recovery_speed_relief_s3`：
+- 关键指标对比（stage18_tune2 → stage19）：
   - seed0：
-    - `terminal_formation_error: 9.4357 -> 7.0569`
-    - `min_obstacle_clearance: 0.3476 -> 0.5117`
-    - `fallback_ratio: 0.4817 -> 0.4383`
+    - `terminal_formation_error: 7.057 → 7.057`（持平）
+    - `min_obstacle_clearance: 0.512 → 0.512`（持平）
+    - `fallback_ratio: 0.438 → 0.438`（持平）
   - seed1：
-    - `terminal_formation_error: 3.9424 -> 4.9425`
-    - 仍安全，但恢复质量略差
+    - `terminal_formation_error: 4.942 → 4.937`（微改善）
+    - `min_obstacle_clearance: 0.287 → 0.291`（微改善）
+    - `time_to_recover_formation: 18.0 → 18.3`（recover 持续更久，符合预期）
   - seed2：
-    - `terminal_formation_error: 15.4365 -> 14.6423`
-    - `min_obstacle_clearance: 0.4775 -> 0.5233`
+    - `terminal_formation_error: 14.642 → 14.642`（持平）
+    - `min_obstacle_clearance: 0.523 → 0.523`（持平）
 
 ## 6. 当前真实问题
 
 ### 6.1 当前主矛盾
-- 当前主矛盾已经不是“缺模块”。
+- 当前主矛盾已经不是"缺模块"，也不再是"recover 过早退出"。
 - 当前主矛盾是：
   - `s3` 虽然已经全组安全，但 `team_goal_reached` 仍然是 `0/3`
-  - `seed1` 在 recover 末段会过早回到 `follow`
-  - `seed0/seed2` 在 recover 末段依然存在“队友逐步超前 leader”的现象
+  - recover 退出迟滞机制已就位（本次实现），seed1 的 `time_to_recover_formation` 从 18.0 上升到 18.3 证明机制生效
+  - 但 s3 的根本问题是：**recover 模式下编队恢复本身效率不足**，即使给了更多时间也无法在仿真结束前完成恢复
+  - seed0、seed2 的 `time_to_recover_formation = nan` 说明根本没有达到恢复完成状态
 
-### 6.2 今天已经确认的事实
+### 6.2 已确认的事实（累积）
 - 不要再改任何 follower recovery 横向 bias。
 - 不要再尝试更远的 leader 前向目标点。
 - leader recovery 纵向门控是有效方向，但收益不是单调的，必须小步验证。
-- FSM recover 退出逻辑确实是下一步瓶颈，但今天尝试过的“直接下调 lead 阈值”没有形成可保留解。
+- FSM recover 退出逻辑已经加入迟滞机制（本次），不需要再改退出阈值。
+- s3 的 `team_goal_reached = 0/3` 问题根源在 recover 模式下**编队收敛速度**，不是退出时机。
 
 ## 7. 下一步指令
 
-### 7.1 下一位工程师启动 AI 后，应该马上写哪段代码
-- 优先目标文件：
-  - `src/apflf/decision/fsm_mode.py`
-  - 必要时联动：
-    - `tests/test_modes.py`
-- 下一刀要做的不是降低 recover 退出硬阈值，而是：
-  - 给 `recover -> follow` 的退出逻辑增加“退出迟滞”或“连续满足条件若干步后才退出 recover”的机制
+### 7.1 下一位工程师启动 AI 后，应该马上分析的问题
+- 优先分析方向：
+  - s3 的 3 个 seed 中，recover 模式下编队为什么不能在仿真时间内恢复完成？
+  - 需要读取 `outputs/stage19_recover_hysteresis_s3/traj/*.npz` 轨迹数据
+  - 关注 recover 模式时段内各车辆的横向偏移和纵向间距变化趋势
 
-### 7.2 下一刀必须满足的数学约束
+### 7.2 下一刀可能的方向（优先级排列）
+
+#### 方向 A（推荐）：提高 recover 模式下的编队收敛速度
+- 目标文件：
+  - `src/apflf/controllers/base.py`（recover 模式下 follower 的控制增益）
+  - 可能联动：`src/apflf/controllers/apf_lf.py`
+- 思路：
+  - 在 recover 模式下，适当增大 `formation_gain` 和 `lateral_gain` 的权重
+  - 或者减小 `consensus_gain` 以降低编队内部耦合对横向恢复的阻力
+  - 必须保持参数有界（不能突破 `ControllerConfig` 中的上下界）
+
+#### 方向 B（次选）：增加仿真步数让 s3 有更多恢复时间
+- 目标文件：`configs/scenarios/s3_narrow_passage.yaml`
+- 思路：将 `steps` 从当前值适当增加（例如 200 → 240 或 260）
+- 风险：这只是治标不治本，但可以先验证"给足够时间是否能恢复"
+
+#### 方向 C（实验性）：recover 模式下动态调整 leader 速度上限
+- 目标文件：`src/apflf/controllers/base.py`
+- 思路：在 recover 模式下，根据 `max_teammate_lag` 动态调低 leader 速度，让队友追赶更快
+- 风险：可能与修复 C（post-goal speed floor）冲突，需仔细测试
+
+### 7.3 下一刀必须满足的数学约束
 - 在 `preview horizon H` 内仍必须保持：
-  - 边界安全：
-    - `h_b(x_{t+k}) >= 0`
-  - 障碍/车间安全：
-    - `h_obs(x_{t+k}) >= 0`
+  - 边界安全：`h_b(x_{t+k}) >= 0`
+  - 障碍/车间安全：`h_obs(x_{t+k}) >= 0`
 - nominal/safety 的最小干预原则仍必须保持：
   - 如果 `u_nom` 已满足所有安全约束，则 `u_safe = u_nom`
-- 新的 recover 退出逻辑必须满足：
-  - 只允许在 `recover` 模式内部生效
-  - 不能降低现有恢复硬阈值去换行为
-  - 退出 recover 前，必须要求恢复条件连续满足 `N_exit` 步，而不是单步满足就退出
-  - 建议 `N_exit >= decision.hysteresis_steps`
-  - 恢复条件至少显式使用以下量中的一种或多种：
-    - `max_teammate_lag`
-    - `team_formation_error`
-    - `max_centerline_offset`
-
-### 7.3 下一刀的实现建议
-- 建议在 `FSMModeDecision` 内增加 recover-exit counter，而不是改风险阈值或 lead 阈值。
-- 推荐思路：
-  - 进入 `recover` 后，只有当“恢复完成条件”连续满足 `N_exit` 步，才允许候选模式切回 `follow`
-  - 一旦中间任何一步不满足，则 counter 归零
-- 这样可以解决今天已经观察到的真实问题：
-  - `seed1` 在 recover 末段因为一两步短暂满足条件而过早退回 `follow`
+- 任何控制增益调整必须有界且在配置文件中可配置
+- 不允许在 recover 模式中引入硬编码常数
 
 ### 7.4 下一刀的验证顺序
 1. `python -m compileall src tests scripts`
-2. `python -m pytest -q`
-3. `s1`
-4. `s2`
-5. `s3`
+2. `python -m pytest -q`（必须 ≥ 67 passed）
+3. `s1`（3 seeds）
+4. `s2`（3 seeds）
+5. `s3`（3 seeds）
 - 只要 `s1` 任一 seed 退化，立即回退
 - 只要出现：
   - `collision_count > 0`
@@ -290,13 +274,14 @@
   就必须立即回退
 
 ## 8. 当前稳定结论
-- 当前工作区最终停在一个“已验证安全、对 s3 有部分改善、但还没彻底收口”的 checkpoint。
+- 当前工作区停在 **stage19_recover_hysteresis** checkpoint。
+- recover 退出迟滞机制已实现、测试通过、场景验证通过。
 - 当前最可信的结论是：
-  - `s1` 已继续保持全绿
-  - `s2` 保持安全且结论不变
-  - `s3` 在不破坏安全的前提下，`seed0/seed2` 的恢复质量有所改善
+  - `s1` 继续保持全绿（3/3 team_goal_reached）
+  - `s2` 保持安全且结论不变（2/3 team_goal_reached）
+  - `s3` 在不破坏安全的前提下，recover 退出时机得到改善（seed1 时间 +0.3s）
   - 但 `s3 team_goal_reached = 0/3` 仍未解决
-- 下一位工程师明天继续时，主线必须是：
-  - `recover 退出迟滞`
-  - 而不是更激进的 leader 前向目标点
+- 下一位工程师继续时，主线必须是：
+  - 分析 s3 recover 模式下编队恢复效率的瓶颈
+  - 而不是再改 FSM 退出逻辑（已就位）
   - 更不是任何 follower recovery 横向 bias

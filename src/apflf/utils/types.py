@@ -125,6 +125,7 @@ class DecisionConfig:
     stagnation_speed_threshold: float
     stagnation_progress_threshold: float
     stagnation_steps: int
+    recover_exit_steps: int = 4
 
 
 @dataclass(frozen=True)
