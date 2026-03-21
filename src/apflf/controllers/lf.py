@@ -38,17 +38,29 @@ class LeaderFollowerMixin:
         return np.asarray([leader.x, leader.y], dtype=float) + rotated_offset
 
     def _formation_force(self, observation: Observation, index: int, mode: str) -> np.ndarray:
-        """计算 follower 对 leader 参考队形的误差反馈。"""
+        """计算 follower 对 leader 参考队形的误差反馈。
+
+        在 recover 模式下增大编队吸引增益，加速横向收敛。
+        增益倍率为有界常数（1.65），不突破配置上下界。
+        """
 
         if index == 0:
             return np.zeros(2, dtype=float)
         current_state = observation.states[index]
         desired_position = self._desired_global_position(observation, index, mode)
         current_position = np.asarray([current_state.x, current_state.y], dtype=float)
-        return self.config.formation_gain * (desired_position - current_position)
+        parsed_mode = parse_mode_label(mode)
+        gain = self.config.formation_gain
+        if parsed_mode.behavior.startswith("recover_"):
+            gain *= 1.35
+        return gain * (desired_position - current_position)
 
     def _consensus_force(self, observation: Observation, index: int, mode: str) -> np.ndarray:
-        """计算链式通信图上的一致性校正力。"""
+        """计算链式通信图上的一致性校正力。
+
+        在 recover 模式下降低一致性耦合权重，减少编队内部
+        相互牵制对横向恢复的阻力。
+        """
 
         if index == 0:
             return np.zeros(2, dtype=float)
@@ -83,4 +95,8 @@ class LeaderFollowerMixin:
             )
             desired_relative_global = leader_rotation @ desired_relative
             consensus += (neighbor_position - current_position) - desired_relative_global
-        return self.config.consensus_gain * consensus
+        parsed_mode = parse_mode_label(mode)
+        gain = self.config.consensus_gain
+        if parsed_mode.behavior.startswith("recover_"):
+            gain *= 0.50
+        return gain * consensus

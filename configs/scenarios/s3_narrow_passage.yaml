@@ -4,7 +4,7 @@ experiment:
   name: s3_narrow_passage
 
 simulation:
-  steps: 200
+  steps: 250
 
 scenario:
   goal_x: 105.0
