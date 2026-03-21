@@ -380,29 +380,64 @@ class FSMModeDecision(ModeDecisionModule):
         if not front_obstacles:
             return "left"
 
-        upper_bound = observation.road.lane_center_y + observation.road.half_width
-        lower_bound = observation.road.lane_center_y - observation.road.half_width
-        upper_outer_edge = max(
-            [obstacle.y + 0.5 * obstacle.width for obstacle in front_obstacles if obstacle.y >= 0.0],
-            default=observation.road.lane_center_y,
+        leader = observation.states[0]
+        ordered_obstacles = sorted(
+            front_obstacles,
+            key=lambda obstacle: (
+                max(
+                    obstacle.x - 0.5 * obstacle.length - (leader.x + 0.5 * self.vehicle_length),
+                    0.0,
+                ),
+                abs(obstacle.y - leader.y),
+            ),
         )
-        lower_outer_edge = min(
-            [obstacle.y - 0.5 * obstacle.width for obstacle in front_obstacles if obstacle.y < 0.0],
-            default=observation.road.lane_center_y,
-        )
-        left_channel = upper_bound - upper_outer_edge
-        right_channel = lower_outer_edge - lower_bound
-        if left_channel > right_channel + 1e-6:
+        decisive_margin = 0.15
+        for obstacle in ordered_obstacles:
+            left_margin, right_margin = self._passing_side_margins(
+                observation,
+                obstacle=obstacle,
+            )
+            margin_delta = left_margin - right_margin
+            if min(left_margin, right_margin) < 0.0 or abs(margin_delta) > decisive_margin:
+                return "left" if margin_delta > 0.0 else "right"
+
+        left_score = 0.0
+        right_score = 0.0
+        for obstacle in ordered_obstacles:
+            left_margin, right_margin = self._passing_side_margins(
+                observation,
+                obstacle=obstacle,
+            )
+            obstacle_rear_x = obstacle.x - 0.5 * obstacle.length
+            longitudinal_gap = max(
+                obstacle_rear_x - (leader.x + 0.5 * self.vehicle_length),
+                0.0,
+            )
+            weight = 1.0 / max(1.0 + longitudinal_gap, 1e-6)
+            left_score += weight * left_margin
+            right_score += weight * right_margin
+
+        if left_score > right_score + 1e-6:
             return "left"
-        if right_channel > left_channel + 1e-6:
+        if right_score > left_score + 1e-6:
             return "right"
 
-        leader = observation.states[0]
-        nearest = min(
-            front_obstacles,
-            key=lambda obstacle: (obstacle.x - leader.x) ** 2 + (obstacle.y - leader.y) ** 2,
-        )
+        nearest = ordered_obstacles[0]
         return "right" if nearest.y >= leader.y else "left"
+
+    def _passing_side_margins(
+        self,
+        observation: Observation,
+        *,
+        obstacle: ObstacleState,
+    ) -> tuple[float, float]:
+        center_y = observation.road.lane_center_y
+        upper_limit = center_y + observation.road.half_width - 0.5 * self.vehicle_width
+        lower_limit = center_y - observation.road.half_width + 0.5 * self.vehicle_width
+        inflated_half_width = 0.5 * obstacle.width + 0.5 * self.vehicle_width + self.safe_distance
+        left_target_y = obstacle.y + inflated_half_width
+        right_target_y = obstacle.y - inflated_half_width
+        return (upper_limit - left_target_y, right_target_y - lower_limit)
 
     def _is_stagnated(self, observation: Observation) -> bool:
         if len(self._leader_x_history) < self._leader_x_history.maxlen:

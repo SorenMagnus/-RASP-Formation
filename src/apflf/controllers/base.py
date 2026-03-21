@@ -255,10 +255,15 @@ class BaseNominalController(Controller):
             # side during passage clearance, so keep recovery behavior neutral.
             return np.zeros(2, dtype=float)
 
+        if index == 0:
+            # The leader uses an explicit lateral bypass target in hazard modes. Keep
+            # its extra behavior bias neutral so the target can adapt locally when a
+            # staggered blocker makes the previously chosen side infeasible.
+            return np.zeros(2, dtype=float)
+
         direction = 1.0 if parsed_mode.behavior.endswith("_left") else -1.0
         base_gain = 0.35 * road_gain if parsed_mode.behavior.startswith("yield") else 0.70 * road_gain
-        follower_scale = 1.0 if index == 0 else 0.7
-        return np.asarray([0.0, direction * follower_scale * base_gain], dtype=float)
+        return np.asarray([0.0, direction * 0.7 * base_gain], dtype=float)
 
     def _braking_speed(self, current_x: float, target_x: float) -> float:
         """根据接近终点时的剩余误差构造制动一致的参考速度。

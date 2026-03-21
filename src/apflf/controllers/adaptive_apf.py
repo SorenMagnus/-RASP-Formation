@@ -206,9 +206,16 @@ class AdaptiveAPFController(APFLFController):
             repulsive_gain *= mode_repulsive_scale
             road_gain *= mode_road_scale
             if index == 0:
-                target = self._leader_goal_target(observation, state)
+                target = self._leader_goal_target(observation, state, mode)
+                leader_guidance_force = self._leader_bypass_force(
+                    observation,
+                    state,
+                    mode,
+                    target_y=float(target[1]),
+                )
             else:
                 target = self._desired_global_position(observation, index, mode)
+                leader_guidance_force = np.zeros(2, dtype=float)
             attractive_force = self._attractive_force(state, target)
             formation_force = self._formation_force(observation, index, mode)
             consensus_force = self._consensus_force(observation, index, mode)
@@ -232,6 +239,7 @@ class AdaptiveAPFController(APFLFController):
                 + obstacle_force
                 + peer_force
                 + behavior_force
+                + leader_guidance_force
             )
             cached_forces.append(total_force)
             cached_speeds.append(

@@ -541,7 +541,10 @@ class CBFQPSafetyFilter(SafetyFilter):
         best_steer_delta = math.inf
         best_action_verification_error: str | None = None
         margin_tolerance = 1e-3
-        creep_margin_tolerance = 0.03
+        # Allow a small preview-margin deficit for near-stop creep if the one-step
+        # action is still exactly safe. This helps stalled vehicles complete a low-
+        # speed steering transition instead of freezing at zero speed forever.
+        creep_margin_tolerance = 0.08
         best_safe_action: Action | None = None
         best_safe_correction = math.inf
         best_safe_accel = -math.inf

@@ -3,8 +3,8 @@
 ## 1. 技术栈红线
 
 ### 1.1 研究目标
-- 目标不是做演示 demo，而是持续收敛到"论文级 artifact"。
-- 主架构必须始终保持三层闭环：
+- 目标不是做 demo，而是持续收敛到可投稿 IEEE 级别论文的 artifact。
+- 主架构必须始终保持三层闭环，不允许退化成单层或黑盒：
   - `Nominal Controller`
   - `Safety Filter (CBF-QP + OSQP)`
   - `Mode Decision (FSM 为主，RL 仅允许作为后续可选扩展)`
@@ -38,252 +38,299 @@
   - `python -m compileall src tests scripts`
   - `python -m pytest -q`
 - 任何时候都不允许带着已知回归进入下一轮开发。
-- 行为调优类改动必须按顺序验证：
-  - `s1`
-  - `s2`
-  - `s3`
-- 只要 `s1` 任一 seed 退化，就必须立即回退，不能继续扩展到其他场景。
+- 行为调优类改动必须最终回归验证 `s1 -> s2 -> s3`，只要 `s1` 任一 seed 退化，就必须立即停手回滚，不允许继续扩展到其他场景。
 
-### 1.4 仓库现实约束
-- 当前目录已是 git 仓库。
-- 结论必须以当前代码和 `outputs/` 中的真实产物为准。
+### 1.4 架构红线
+- 不允许为了通过 s4/s5 直接删除 safety preview、删除 fallback、改成纯启发式停车器。
+- 不允许把 leader/follower 编队语义删掉，只能做有界增强。
+- 不允许用“放宽安全约束”替代“低速精细 maneuver”；任何 relax 只能发生在 near-stop creep 区间，并且必须保持 exact one-step safety。
+- 论文 artifact 红线不变：
+  - 同一轨迹的 metrics 必须可重算
+  - summary / traj / config 必须一致可追溯
+  - 不能依赖手动 UI 调参数作为实验来源
 
 ## 2. 当前开发游标
 
-### 2.1 当前阶段
-- 已完成 `Phase A -> Phase E` 主体实现。
-- 当前处于：
-  - `Phase E 行为稳定性收口` 最终阶段
-  - 刚完成 `recover 模式编队收敛增强` 的实现与验证
-  - **s1/s2/s3 全部 3/3 team_goal_reached = True**
+### 2.1 当前代码游标
+- 当前工作区已修改但未提交的 tracked 文件：
+  - `src/apflf/controllers/apf_lf.py`
+  - `src/apflf/controllers/adaptive_apf.py`
+  - `src/apflf/controllers/base.py`
+  - `src/apflf/decision/fsm_mode.py`
+  - `src/apflf/safety/safety_filter.py`
+  - `tests/test_modes.py`
+  - `tests/test_cbf_filter.py`
+- 当前工作区未跟踪的日志文件：
+  - `stage23_probe_s5_run.log`
+  - `stage24_probe_s5_run.log`
+  - `stage25_probe_s5_run.log`
+- 当前开发所处位置：
+  - 已完成 `s4/s5` 的失败复现
+  - 已完成一轮 nominal/FSM 侧的最小增强
+  - 已完成一轮 safety fallback 的 low-speed creep 修补
+  - **尚未完成最新 safety patch 之后的场景级重新验证**
 
-### 2.2 当前稳定 checkpoint
-- 当前工作区停在**`stage20_recover_convergence_boost`**。
-- 本次新增的核心改动：
-  - `recover 模式下 formation_gain 增大 1.35x`：加速编队横向收敛
-  - `recover 模式下 consensus_gain 降低 0.50x`：减少 follower 之间的互相牵制
-  - `s3 仿真步数从 200 增加到 250`：给编队恢复更多时间
-- 当前稳定代码已通过：
+### 2.2 当前稳定代码级状态
+- 已恢复并确认开发环境：
+  - `python -m pip install -e ".[dev]"`
+- 当前代码通过：
   - `python -m compileall src tests scripts`
-  - `PYTHONPATH='src;.codex_tmp\\pytest' python -m pytest -q`
-  - 结果：`67 passed`
-
-## 3. 本次工作区扫描结果
-
-### 3.1 本次改动的源码/测试/配置文件
-- `src/apflf/controllers/lf.py`
-  - `_formation_force()` 在 recover 模式下 gain *= 1.35
-  - `_consensus_force()` 在 recover 模式下 gain *= 0.50
-- `configs/scenarios/s3_narrow_passage.yaml`
-  - `steps: 200 → 250`
-- `AI_MEMORY.md`
-  - 本文件
-
-### 3.2 本次扫描到的重要实验产物
-- 当前保留并认可的稳定产物（**stage20b 系列**）：
-  - `outputs/stage20b_recover_gain_s1` (seeds 0,1,2)
-  - `outputs/stage20b_recover_gain_s2` (seeds 0,1,2)
-  - `outputs/stage20b_recover_gain_s3` (seeds 0,1,2)
-- 上一轮保留的参考基线（**stage19 系列**）：
-  - `outputs/stage19_recover_hysteresis_s1` (seeds 0,1,2)
-  - `outputs/stage19_recover_hysteresis_s2` (seeds 0,1,2)
-  - `outputs/stage19_recover_hysteresis_s3` (seeds 0,1,2)
-- 已失败的中间产物（stage20 系列，formation_gain=1.65x，导致 s1 退化，不保留）：
-  - `outputs/stage20_recover_gain_s1`
-
-### 3.3 扫描结论
-- 本次改动仅涉及 LF 混入类的编队/一致性力增益和 s3 配置步数，没有改动：
-  - 任何名义控制器核心（controllers/adaptive_apf.py, apf_lf.py 等）
-  - 安全滤波层（safety/）
-  - 环境模型（env/）
-  - 仿真主循环（sim/）
-  - FSM 模式决策逻辑（decision/fsm_mode.py）
-- 改动范围最小化。
-
-## 4. 已完成工作
-
-### 4.1 三层架构与实验链
-- 已实现并接通：
-  - `APF / ST-APF / APF-LF / adaptive APF`
-  - `CBF-QP + OSQP + preview + fallback`
-  - `FSM mode decision`
-- 环境与仿真主链完整：
-  - `src/apflf/env/geometry.py`
-  - `src/apflf/env/road.py`
-  - `src/apflf/env/dynamics.py`
-  - `src/apflf/env/obstacles.py`
-  - `src/apflf/sim/world.py`
-  - `src/apflf/sim/runner.py`
-- 论文实验与导出链可用：
-  - `src/apflf/analysis/metrics.py`
-  - `src/apflf/analysis/stats.py`
-  - `src/apflf/analysis/export.py`
-  - `scripts/reproduce_paper.py`
-  - `scripts/export_figures.py`
-  - `src/apflf/sim/replay.py`
-
-### 4.2 当前保留的有效修复（累积）
-
-#### 修复 A：leader 过终点后仍保持前向目标
-- 文件：`src/apflf/controllers/apf_lf.py`, `src/apflf/controllers/adaptive_apf.py`
-- 作用：避免 leader 一过 `goal_x` 就把吸引点钉死在终点位置
-
-#### 修复 B：leader recovery speed relief
-- 文件：`src/apflf/controllers/base.py`
-- 作用：队友明显超前且没有明显掉队时，leader 允许继续向前拉开
-
-#### 修复 C：leader post-goal recovery speed floor
-- 文件：`src/apflf/controllers/base.py`
-- 公式：若 `leader.x >= goal_x` 且未恢复完成：
-  - `v_cap = min(v_target_max, 0.35 + 0.35 * v_target_max * speed_scale)`
-  - `speed_scale = max(0.18, min(lag_scale, error_scale))`
-- 作用：修掉 recover 模式下 leader 一过 goal_x 就被钉停的问题
-
-#### 修复 D：recover-exit hysteresis counter
-- 文件：`src/apflf/decision/fsm_mode.py`, `src/apflf/utils/types.py`, `src/apflf/utils/config.py`, `configs/default.yaml`, `tests/test_modes.py`
-- 数学约束：
-  - recover→follow 退出条件必须连续满足 `N_exit = recover_exit_steps` 步
-  - 当前默认 `N_exit = 4`（`>= hysteresis_steps = 3`）
-- 作用：防止 s3 seed1 类场景中 recover 模式因一两步短暂满足条件就过早退出
-
-#### 修复 E（本次新增）：recover 模式编队收敛增强
-- 文件：`src/apflf/controllers/lf.py`, `configs/scenarios/s3_narrow_passage.yaml`
-- 数学约束：
-  - recover 模式下 `formation_gain *= 1.35`（有界常数，不突破 ControllerConfig 上下界）
-  - recover 模式下 `consensus_gain *= 0.50`（有界常数）
-  - s3 仿真步数从 200 增加到 250（给编队恢复更多时间）
-- 作用：解决 s3 recover 模式下编队横向收敛速度不足的问题
-- 根因分析：
-  - 窄通道穿越后，follower 被推到与 leader 相反的一侧（y 差 3m+）
-  - 原来的 formation_gain=1.2 和 consensus_gain=0.25 产生的恢复力不足
-  - 增大 formation_gain 加速了 follower 直接追踪编队目标的力
-  - 减小 consensus_gain 减少了 follower 之间的相互牵制力
-- 失败经验：1.65x 倍率导致 s1 seed0 退化和 seed2 boundary violation（stage20，已废弃）
-
-## 5. 当前稳定验证结果
-
-### 5.1 代码级验证
-- 当前稳定代码通过：
-  - `python -m compileall src tests scripts`
-  - `PYTHONPATH='src;.codex_tmp\\pytest' python -m pytest -q`
+  - `python -m pytest -q`
 - 当前结果：
-  - `67 passed`
+  - `71 passed`
 
-### 5.2 场景级验证
+### 2.3 当前已验证的实验游标
+- 下面这些输出已经真实落盘，可作为交接依据：
+  - `outputs/stage21_validate_s4`
+  - `outputs/stage21_validate_s5`
+  - `outputs/stage22_validate_s4`
+  - `outputs/stage23_probe_s4`
+  - `outputs/stage23_probe_s5`
+  - `outputs/stage24_probe_s5`
+- `stage25_probe_s5` 在本轮对话中被中断，**不要把它视为有效结论**。
 
-#### s1：继续保持全绿 ✅
-- 对应产物：`outputs/stage20b_recover_gain_s1`
-- 结果：
-  - 3/3 `collision_count = 0`
-  - 3/3 `boundary_violation_count = 0`
-  - 3/3 `team_goal_reached = True`
-- 与 stage19 对比：无退化
+### 2.4 当前最重要的结论
+- `s1/s2/s3`：
+  - 上一轮记忆中的 `stage20b` 结论仍然是历史稳定结论
+  - 但在本轮针对 `s4/s5` 的新 patch 之后，**还没有重新跑 `s1/s2/s3` 回归**
+- `s4`：
+  - 仍未通过
+  - leader 已经能更明显地偏到右侧，但仍卡在慢车后方，未形成真正超车
+- `s5`：
+  - 仍未通过
+  - 但 failure mode 已明显收缩：从最初的错误侧选择 `yield_left`，修到 `yield_right`
+  - leader_final_x 已从 `24.68` 提升到约 `26.70`
+  - 当前卡点已收缩到：
+    - near-stop 状态下需要“向左打角 + 小正加速度”的低速重定向
+    - safety fallback 仍然过于保守，导致车速被锁死
 
-#### s2：改善，全绿 ✅（提升！）
-- 对应产物：`outputs/stage20b_recover_gain_s2`
-- 结果：
-  - 3/3 `collision_count = 0`
-  - 3/3 `boundary_violation_count = 0`
-  - 3/3 `team_goal_reached = True`（seed2 从 False 改善为 True）
-- 与 stage19 对比：seed2 改善
+## 3. 已完成工作
 
-#### s3：重大突破，全绿 ✅（从 0/3 翻转为 3/3！）
-- 对应产物：`outputs/stage20b_recover_gain_s3`
-- 结果：
-  - 3/3 `collision_count = 0`
-  - 3/3 `boundary_violation_count = 0`
-  - 3/3 `team_goal_reached = True`
-- 关键指标对比（stage19 → stage20b）：
-  - seed0：
-    - `terminal_formation_error: 7.057 → 1.872`（大幅改善）
-    - `min_obstacle_clearance: 0.512 → 0.511`（持平，安全保持）
-    - `fallback_ratio: 0.438 → 0.379`（下降，安全层介入更少）
-  - seed1：
-    - `terminal_formation_error: 4.937 → 2.121`（大幅改善）
-    - `min_obstacle_clearance: 0.291 → 0.564`（改善）
-    - `fallback_ratio: 0.413 → 0.331`（下降）
-  - seed2：
-    - `terminal_formation_error: 14.642 → 3.427`（大幅改善）
-    - `min_obstacle_clearance: 0.523 → 0.515`（持平）
-    - `fallback_ratio: 0.475 → 0.372`（下降）
+### 3.1 基线恢复
+- 重新安装了开发依赖，恢复了本机可运行环境。
+- 重新确认了基线状态：
+  - `python -m compileall src tests scripts` 通过
+  - 初始全量测试重新跑通时为 `67 passed`
+  - 本轮新增回归测试后，当前为 `71 passed`
 
-## 6. 当前真实问题
+### 3.2 已完成的场景级验证
 
-### 6.1 当前主矛盾
-- s1/s2/s3 的 `team_goal_reached` 已全部为 3/3 True ✅
-- 当前主矛盾已从"行为稳定性"转移到：
-  - s4/s5 场景验证（当前未验证）
-  - 大规模实验矩阵（30 seeds × 场景 × 基线 × 消融）
-  - 论文图表生成
+#### stage21：首次正式验证 s4/s5
+- `outputs/stage21_validate_s4`
+  - seeds `0/1/2` 全部失败
+  - `leader_final_x` 约 `53.09 / 53.15 / 53.37`
+  - `fallback_ratio` 约 `0.193 / 0.189 / 0.207`
+  - 无碰撞、无边界越界，但 leader 被 safety layer 长期压在慢车后方
+- `outputs/stage21_validate_s5`
+  - seeds `0/1/2` 全部失败
+  - `leader_final_x` 约 `24.68 / 24.68 / 24.69`
+  - `fallback_ratio` 约 `0.353 / 0.332 / 0.550`
+  - 初始 failure mode 是 `yield_left -> escape_left`，明显选错侧
 
-### 6.2 已确认的事实（累积）
-- 不要再改任何 follower recovery 横向 bias。
-- 不要再尝试更远的 leader 前向目标点。
-- leader recovery 纵向门控是有效方向，但收益不是单调的，必须小步验证。
-- FSM recover 退出逻辑已经加入迟滞机制（stage19），不需要再改退出阈值。
-- recover 模式下增大 formation_gain 是有效方向（stage20b），但不能超过 1.35x（1.65x 导致退化）。
-- consensus_gain 在 recover 模式下降低到 0.5x 是有效的。
+#### 诊断结论：问题不只是 FSM，也不只是 adaptive controller
+- 额外做过两组对照诊断：
+  - 把 `decision.kind` 暂时改成 `static + follow`
+  - 把 `controller.kind` 暂时改成 `apf_lf`
+- 结论：
+  - `s4/s5` 失败不是“仅仅 FSM 错了”
+  - 也不是“仅仅 adaptive_apf 错了”
+  - 根因更接近：
+    - leader 缺少真正的侧向绕行目标
+    - staggered blockers 下 side preference 规则不够局部
+    - near-stop 时 safety fallback 无法完成低速转向蠕动
 
-## 7. 下一步指令
+### 3.3 本轮已完成的源码改动
 
-### 7.1 下一位工程师启动 AI 后，应该马上分析的问题
-- 优先分析方向：
-  - s4（双车道交互超车）和 s5（多智能体密集避碰）的场景验证
-  - 这些场景可能暴露新的控制问题
-  - 需要先检验 configs/scenarios/ 中 s4/s5 的配置是否合理
+#### 改动 A：FSM 的 `preferred_side` 从粗糙通道判断改成“最近不对称阻塞物优先”
+- 文件：
+  - `src/apflf/decision/fsm_mode.py`
+- 具体内容：
+  - 新增 `_passing_side_margins()`
+  - `_preferred_side()` 不再只看整条道路外缘通道，而是：
+    - 先按 longitudinal gap + lateral proximity 排序 front obstacles
+    - 优先根据最近且有明显不对称余量的 obstacle 选侧
+    - 若单个 obstacle 不够 decisive，再做带 longitudinal weight 的 margin 汇总
+- 作用：
+  - 把 `s5` 的初始错误策略从 `yield_left` 修正为 `yield_right`
 
-### 7.2 下一刀可能的方向（优先级排列）
+#### 改动 B：leader hazard 模式不再依赖固定横向 bias，而是拥有显式 bypass target
+- 文件：
+  - `src/apflf/controllers/apf_lf.py`
+  - `src/apflf/controllers/adaptive_apf.py`
+  - `src/apflf/controllers/base.py`
+- 具体内容：
+  - `BaseNominalController._mode_behavior_force()` 对 leader 在 hazard mode 下改为 `0`
+  - 新增 leader 局部几何 helper：
+    - `_leader_passing_side_margins()`
+    - `_leader_front_obstacles()`
+    - `_leader_behavior_side_sign()`
+    - `_leader_behavior_target_y()`
+    - `_leader_bypass_force()`
+  - `_leader_goal_target()` 现在允许根据当前 mode 和前方 obstacle 生成显式横向绕行目标
+  - `AdaptiveAPFController.compute_actions()` / `APFLFController.compute_actions()` 都已接入 `leader_guidance_force`
+- 数学语义：
+  - leader 的 hazard 语义不再是常数 `±Fy`
+  - 而是 `target_y(mode, obstacles)` 与 `Fy_guidance ∝ (target_y - y_leader)` 的有界引导
 
-#### 方向 A（推荐）：s4/s5 场景验证
-- 目标：
-  - 运行 s4 (3 seeds) 和 s5 (3 seeds)
-  - 检查碰撞/边界违规/到达率
-  - 分析失败原因（如果有）
+#### 改动 C：leader 在 staggered blockers 下允许局部 side flip
+- 文件：
+  - `src/apflf/controllers/apf_lf.py`
+- 具体内容：
+  - `_leader_behavior_side_sign()` 增加局部切边逻辑
+  - 当 nominal mode 给定的 side 对当前“仍在前方的 anchor obstacle”已不可行，而对侧明显更可行时，leader 可局部翻转 side sign
+  - 该判据只在 leader 的局部目标层发生，不改动 FSM 全局 mode label
+- 作用：
+  - 让 `s5` 从“始终粘在错误侧”推进到“开始尝试右绕后再左转”
 
-#### 方向 B（次选）：大规模实验矩阵
-- 目标文件：`scripts/reproduce_paper.py`
-- 思路：
-  - 30 seeds × s1-s5 × 基线方法（apf, apf_lf, st_apf, dwa, orca）
-  - 消融实验（A1-A5）
-  - 统计检验与论文图表生成
-- 前置条件：s4/s5 需要先经过初步验证
+#### 改动 D：safety fallback 对 near-stop creep 的 preview deficit 容忍从 `0.03` 放宽到 `0.08`
+- 文件：
+  - `src/apflf/safety/safety_filter.py`
+- 具体内容：
+  - `_fallback_action()` 中：
+    - `creep_margin_tolerance = 0.03 -> 0.08`
+  - 语义限制没有变：
+    - 仅在 `state.speed <= 0.25`
+    - `candidate.accel > 0`
+    - `verification_error is None`
+    - nominal 仍想前进时才允许
+- 这是一个**受限 relax**，不是全局放松 preview safety
 
-#### 方向 C（实验性）：论文写作材料准备
-- 目标文件：`scripts/export_figures.py`
-- 思路：生成典型轨迹图、风险曲线、QP修正量曲线等
+### 3.4 本轮新增/更新的测试
 
-### 7.3 下一刀必须满足的数学约束
-- 在 `preview horizon H` 内仍必须保持：
-  - 边界安全：`h_b(x_{t+k}) >= 0`
-  - 障碍/车间安全：`h_obs(x_{t+k}) >= 0`
-- nominal/safety 的最小干预原则仍必须保持：
-  - 如果 `u_nom` 已满足所有安全约束，则 `u_safe = u_nom`
-- 任何控制增益调整必须有界且在配置文件中可配置
-- 不允许在 recover 模式中引入硬编码常数
+#### `tests/test_modes.py`
+- 新增：
+  - `test_fsm_preferred_side_prioritizes_the_nearest_asymmetric_blocker()`
+  - `test_apf_lf_leader_goal_target_builds_a_true_bypass_offset()`
+  - `test_apf_lf_leader_goal_target_can_flip_locally_when_staggered_blocker_changes_side()`
+- 更新：
+  - `test_apf_lf_controller_consumes_mode_topology_and_behavior()` 现在使用真实 blocker 场景，不再假设“无障碍也必须横摆”
 
-### 7.4 下一刀的验证顺序
-1. `python -m compileall src tests scripts`
-2. `python -m pytest -q`（必须 ≥ 67 passed）
-3. `s1`（3 seeds）
-4. `s2`（3 seeds）
-5. `s3`（3 seeds）
-- 只要 `s1` 任一 seed 退化，立即回退
-- 只要出现：
-  - `collision_count > 0`
-  - `boundary_violation_count > 0`
-  - `min_obstacle_clearance = 0.0`
-  就必须立即回退
+#### `tests/test_cbf_filter.py`
+- 新增：
+  - `test_fallback_allows_small_preview_deficit_for_one_step_safe_creep()`
+- 这个测试直接固化了 `s5` 停滞点的一个真实诊断快照，保证 near-stop creep relax 只发生在：
+  - one-step exact safety 成立
+  - preview deficit 很小
+  - 正加速度确实能帮助重定向
 
-## 8. 当前稳定结论
-- 当前工作区停在 **stage20_recover_convergence_boost** checkpoint。
-- recover 模式编队收敛增强机制已实现、测试通过、场景验证通过。
-- 当前最可信的结论是：
-  - `s1` 继续保持全绿（3/3 team_goal_reached）
-  - `s2` 从 2/3 提升到 **3/3 team_goal_reached**
-  - `s3` 从 **0/3 翻转为 3/3 team_goal_reached**
-  - 全部 9 个 run 的 collision=0, boundary_violation=0
-  - fallback_ratio 在 s3 场景下反而降低（安全层介入更少，符合最小干预原则）
-- 下一位工程师继续时，主线必须是：
-  - 验证 s4/s5 场景
-  - 准备大规模实验矩阵
-  - 而不是再改 s1/s2/s3 的行为调优（已全部通过）
+## 4. 当前实验事实与量化进度
+
+### 4.1 s4 量化进度
+- `stage21_validate_s4`：
+  - seed0 `leader_final_x = 53.09`
+- `stage22_validate_s4`：
+  - seed0 `leader_final_x = 53.12`
+- `stage23_probe_s4`：
+  - seed0 `leader_final_x = 53.39`
+- 结论：
+  - leader 横向偏置略增强，但没有质变
+  - 当前仍是“跟车偏移”，不是“形成可持续超车轨迹”
+
+### 4.2 s5 量化进度
+- `stage21_validate_s5`：
+  - seed0 `leader_final_x = 24.68`
+  - mode 主要是 `yield_left -> escape_left`
+- `stage23_probe_s5`：
+  - seed0 `leader_final_x = 26.70`
+  - mode 已变成 `yield_right -> escape_right`
+- `stage24_probe_s5`：
+  - seed0 `leader_final_x = 26.71`
+  - 仍失败，但 leader 的停滞点已经从 `y ≈ +1.5` 收缩到 `y ≈ -0.9`
+- 结论：
+  - side selection 和 nominal bypass 确实有增益
+  - 但当前真正卡住的是 near-stop safety fallback
+
+### 4.3 已完成的关键诊断
+- 在 `stage24_probe_s5` 的停滞步附近，已做过精确诊断：
+  - 代表性状态：
+    - `step = 80`
+    - leader `x = 26.6805`
+    - leader `y = -0.9103`
+    - leader `speed = 0.0995`
+    - nominal action `= (accel=2.0, steer=0.4363)`
+- 对 candidate `(accel > 0, steer = 0.436)` 的诊断结果：
+  - `(0.1, 0.436)`：
+    - preview margin `≈ -0.0354`
+    - `verification_error is None`
+  - `(0.2, 0.436)`：
+    - preview margin `≈ -0.0453`
+    - `verification_error is None`
+  - `(0.5, 0.436)`：
+    - preview margin `≈ -0.0752`
+    - `verification_error is None`
+- 含义：
+  - 这些动作在 exact one-step sense 上是安全的
+  - 但在 preview margin 上略负，因此原本被 fallback 拒绝
+  - 这就是 `creep_margin_tolerance` 调整的直接依据
+
+## 5. 下一步指令
+
+### 5.1 下一位工程师启动 AI 后，应该马上写哪段代码
+- **优先文件**：
+  - `src/apflf/safety/safety_filter.py`
+- **优先函数**：
+  - `CBFQPSafetyFilter._fallback_action()`
+- **马上要写的代码**：
+  - 在 `_fallback_action()` 中新增一个专用的 `near-stop guided creep` 选择分支，优先于“原地打角停车”型 fallback。
+  - 推荐新增独立 helper，例如：
+    - `_select_near_stop_guided_creep(...)`
+  - 不要继续先调 `fsm_mode.py`
+  - 不要继续先调 `adaptive_apf.py`
+  - 眼下最该写的是 low-speed fallback 逻辑，而不是再加新的 discrete mode
+
+### 5.2 必须满足的具体数学约束
+- 该新分支只能在以下条件同时满足时激活：
+  - `state.speed <= 0.5`
+  - `nominal_vector[0] > 0.0`
+  - `verification_error is None`
+  - `candidate.accel > 0.0`
+  - `candidate.steer` 与 nominal/guided 方向同号
+- 允许的 preview deficit 必须有界：
+  - 设 `epsilon_creep_local`
+  - 要求 `0.08 <= epsilon_creep_local <= 0.12`
+  - 只允许对 near-stop creep 使用这个有界 relax
+  - 不允许把普通 fallback 的全局 preview margin 放松到这个范围
+- exact one-step safety 绝不能放松：
+  - 必须保持 `_verify_safe_action(...) is None`
+  - 也就是：
+    - 不允许 boundary violation
+    - 不允许一步后 obstacle collision
+    - 不允许一步后 peer collision
+- 候选动作选择顺序应明确写死：
+  - 先最大化 `candidate.accel`
+  - 再最大化 `margin`
+  - 再最小化 `steer_delta`
+- 这个分支必须只服务于“低速重定向蠕动”，不能影响高速正常 fallback
+
+### 5.3 下一位工程师写完代码后的验收顺序
+1. 先跑：
+   - `python -m compileall src tests scripts`
+   - `python -m pytest -q`
+2. 再跑单 seed probe：
+   - `python scripts/run_experiment.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 --exp-id stage26_probe_s5`
+3. 单 seed 的最低验收门槛：
+   - `leader_final_x > 30.0`
+   - `collision_count = 0`
+   - `boundary_violation_count = 0`
+4. 如果 `stage26_probe_s5` 通过，再跑：
+   - `s5` 的 3 seeds
+   - `s4` 的 1 seed probe，再视结果扩成 3 seeds
+5. 只要 `s5` 或 `s4` 有改善，就必须回归验证：
+   - `s1`
+   - `s2`
+   - `s3`
+
+### 5.4 明确不要做的事情
+- 不要把 `safe_distance` 直接调小来“穿过去”。
+- 不要删除 preview verification。
+- 不要把 fallback 改成纯停车策略。
+- 不要先去做大规模 `30 seeds × s1-s5` 矩阵；当前阶段离论文矩阵还早。
+
+## 6. 交接备注
+- 当前最可信的最新结论，以 `summary.csv` 为准，不要只看 `.log`。
+- `stage25_probe_s5_run.log` 是中断文件，不是有效结果。
+- 当前 `AI_MEMORY.md` 已同步到：
+  - 当前改动文件状态
+  - 当前通过的测试状态
+  - 当前有效实验产物
+  - 下一刀该写的代码和数学约束
