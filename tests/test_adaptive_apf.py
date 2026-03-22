@@ -256,6 +256,42 @@ def test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_r
     assert actions[0].accel < 0.5
 
 
+def test_adaptive_apf_overtake_guidance_overcomes_road_push_during_incomplete_lane_shift() -> None:
+    """In the S4-style overtake slice, hazard guidance should keep the leader turning toward the active bypass lane."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    config = load_config(repo_root / "configs" / "scenarios" / "s4_overtake_interaction.yaml")
+    controller = AdaptiveAPFController(
+        config=config.controller,
+        bounds=config.simulation.bounds,
+        road=Road(config.scenario.road),
+        target_speed=config.simulation.target_speed,
+    )
+    observation = Observation(
+        step_index=54,
+        time=5.4,
+        states=(
+            State(x=25.36, y=-1.67, yaw=0.0, speed=2.38),
+            State(x=17.36, y=-1.60, yaw=0.0, speed=2.20),
+            State(x=9.36, y=-1.55, yaw=0.0, speed=2.10),
+        ),
+        road=controller.road.geometry,
+        goal_x=config.scenario.goal_x,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("slow_lead", 32.8, 0.0, 0.0, 2.0, 4.8, 2.0),
+            ObstacleState("side_block", 58.7, 1.8, 0.0, 4.2, 4.6, 2.0),
+        ),
+    )
+
+    action = controller.compute_actions(
+        observation,
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )[0]
+
+    assert action.steer < -0.05
+
+
 def test_scenario_config_extends_and_adaptive_controller_runs_one_step() -> None:
     """典型障碍场景配置应能通过 extends 加载并完成一步仿真。"""
 

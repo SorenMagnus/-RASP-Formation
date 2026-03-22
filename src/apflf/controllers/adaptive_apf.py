@@ -404,6 +404,7 @@ class AdaptiveAPFController(APFLFController):
                     state,
                     mode,
                     target_y=float(target[1]),
+                    road_gain=road_gain,
                 )
             else:
                 target = self._desired_global_position(observation, index, mode)

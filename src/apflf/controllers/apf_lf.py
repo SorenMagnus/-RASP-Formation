@@ -301,6 +301,7 @@ class APFLFController(LeaderFollowerMixin, APFController):
         mode: str | None,
         *,
         target_y: float | None = None,
+        road_gain: float | None = None,
     ) -> np.ndarray:
         parsed_mode = parse_mode_label(mode or "")
         if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
@@ -317,7 +318,15 @@ class APFLFController(LeaderFollowerMixin, APFController):
 
         guidance_gain = max(0.45 * self.config.road_gain, 1.5 * self.config.attraction_gain)
         max_guidance = max(0.75 * self.config.road_gain, 2.5)
-        force_y = float(np.clip(guidance_gain * lateral_error, -max_guidance, max_guidance))
+        force_y = guidance_gain * lateral_error
+        if road_gain is not None:
+            road_force_y = float(self._road_force(state, road_gain=road_gain)[1])
+            opposing_road = max(0.0, -np.sign(lateral_error) * road_force_y)
+            road_compensation = min(0.45 * opposing_road, 0.25 * road_gain)
+            force_y += float(np.sign(lateral_error) * road_compensation)
+            max_guidance += road_compensation
+
+        force_y = float(np.clip(force_y, -max_guidance, max_guidance))
         return np.asarray([0.0, force_y], dtype=float)
 
     def _terminal_recovery_creep_speed(
@@ -429,6 +438,7 @@ class APFLFController(LeaderFollowerMixin, APFController):
         actions: list[Action] = []
         repulsive_scale, road_scale, _ = self._mode_gain_scales(mode)
         for index, state in enumerate(observation.states):
+            road_gain = self.config.road_gain * road_scale
             if index == 0:
                 target = self._leader_goal_target(observation, state, mode)
                 leader_guidance_force = self._leader_bypass_force(
@@ -436,6 +446,7 @@ class APFLFController(LeaderFollowerMixin, APFController):
                     state,
                     mode,
                     target_y=float(target[1]),
+                    road_gain=road_gain,
                 )
             else:
                 target = self._desired_global_position(observation, index, mode)
@@ -443,7 +454,6 @@ class APFLFController(LeaderFollowerMixin, APFController):
             attractive_force = self._attractive_force(state, target)
             formation_force = self._formation_force(observation, index, mode)
             consensus_force = self._consensus_force(observation, index, mode)
-            road_gain = self.config.road_gain * road_scale
             road_force = self._road_force(state, road_gain=road_gain)
             obstacle_force = self._sum_obstacle_forces(
                 observation=observation,
