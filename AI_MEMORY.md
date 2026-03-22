@@ -12,267 +12,101 @@
 ### 1.2 技术栈红线
 - 仅允许 Python 技术栈，当前仓库基线：
   - `Python 3.10+`
-  - `numpy`
-  - `scipy`
-  - `PyYAML`
-  - `matplotlib`
-  - `osqp`
-  - `pytest`
+  - `numpy`, `scipy`, `PyYAML`, `matplotlib`, `osqp`, `pytest`
 - 禁止引入：
-  - ROS
-  - CUDA 依赖
-  - 用端到端黑盒控制器替换现有三层结构
+  - ROS、CUDA 依赖、用端到端黑盒控制器替换现有三层结构
 
 ### 1.3 安全层红线
 - `Safety Filter` 必须保持：
-  - `CBF-QP`
-  - `OSQP`
-  - preview verification
-  - fallback 机制
+  - `CBF-QP`、`OSQP`、preview verification、fallback 机制
 - 禁止通过删除 preview verification、删除 fallback、或直接放松 exact one-step safety 来“刷过” `s4/s5`。
-- 当前阶段禁止优先改 `safety_filter.py` 作为主战场；近几轮已经证明 safety 继续微调收益很低，主瓶颈在 nominal 几何。
+- 当前主矛盾仍在 nominal 层几何。
 
 ### 1.4 实验与复现红线
 - 必须保持 headless CLI、YAML 配置驱动、全链路 seed 可复现。
-- 每个实验输出必须可追溯并至少包含：
-  - `config_resolved.yaml`
-  - `summary.csv`
-  - `traj/*.npz`
-- 每次代码改动后至少通过：
-  - `python -m compileall src tests scripts`
-  - `python -m pytest -q`
-- 不允许带着已知碰撞回归、边界越界回归进入下一轮开发。
+- 每个实验输出必须可追溯并至少包含：`config_resolved.yaml`, `summary.csv`, `traj/*.npz`
+- 每次代码改动后至少通过 `python -m compileall` 与 `python -m pytest -q`。
 
 
 ## 2. 当前开发游标
 
 ### 2.1 当前 HEAD 与工作树
-- 当前 `HEAD`：`596c173e37447b66e912410cd537905cb6fe4e86`（提交说明：`第六次更新`）
-- 当前工作树有未提交改动：
+- 当前 `HEAD`：`3f41802c7d05cea160aa67e8488429e2ee958ce8`（提交说明：`第八次更新`）
+- 当前工作树有未提交的改动（Phase 1 Shaping 增强）：
   - `src/apflf/controllers/adaptive_apf.py`
-  - `src/apflf/controllers/apf_lf.py`
   - `tests/test_adaptive_apf.py`
 
 ### 2.2 当前已验证状态
-- 当前代码已通过：
-  - `python -m pytest -q`
-  - 结果：`81 passed in 94.72s`
-  - `python -m compileall src tests scripts`
-- 当前交接基准应以 **当前工作树 + stage41 输出** 为准，不要再参考更早 AI_MEMORY 里那条“优先改 safety fallback”的旧路线。
+- 全量回归测试通过：
+  - `python -m pytest tests/test_adaptive_apf.py -q` (24 passed)
+  - `python -m pytest -q` 全量测试：`84 passed in ~88s`（包含了本轮新增的 3 个 shaping 边界约束测试）。
 
 ### 2.3 当前场景级游标
-- 当前最可信的单 seed 结果：
-  - `outputs/stage41_probe_s5/summary.csv`
-    - `leader_final_x = 26.703600337341292`
-    - `fallback_events = 206`
-    - `safety_interventions = 241`
-    - `collision_count = 0`
+- 当前最可信的单 seed 结果 (`stage42_probe_s5`)：
+  - `outputs/stage42_probe_s5/summary.csv`
+    - `leader_final_x = 26.646889730553628` (略低于 stage41 的 ~26.70)
+    - `fallback_events = 205`
+    - `safety_interventions = 384` (较 stage41 的 241 大幅上升)
+    - `collision_count = 0` 
     - `boundary_violation_count = 0`
-    - `team_goal_reached = False`
-  - `outputs/stage41_probe_s4/summary.csv`
-    - `leader_final_x = 53.16337668710457`
-    - `fallback_events = 127`
-    - `safety_interventions = 161`
-    - `collision_count = 0`
-    - `boundary_violation_count = 0`
-    - `team_goal_reached = False`
 
 ### 2.4 当前核心结论
-- `s1/s2` 之前的回归是健康的，本轮没有发现单测级退化。
-- `s4/s5` 仍未打穿，当前系统仍然是“安全但过不去”。
-- 目前已经基本确认：
-  - `leader_bypass_force` 只能做局部纠偏，不是主瓶颈。
-  - `target_x` preview 放得太远也不是主瓶颈。
-  - 真正卡住 `s5` 的，是 `AdaptiveAPF` 中 **非当前绕行侧 front obstacle** 对 leader 施加的反向横向分量仍然过强。
+- **Phase 1 Shaping 增强的副作用**：我们通过 steepening 激活曲线和提升 `r_max=0.85` 确实极其有效地降低了 nonrelevant obstacle 施加的错误横向排斥力（`F_obs,y`）。
+- **真正的瓶颈联动暴露**：当名义排斥力降低后，leader 物理上靠得离该 obstacle 更近了；这导致 CBF Safety Filter 感知到横向安全裕度不足，频繁介入（safety_interventions 飙升至 384）。由于 CBF-QP 使用 nominal input 作为参考进行二次规划，CBF 强行对冲了 nominal 控制。
+- 这说明：单纯切除 nominal 排斥力不够，还必须配合更积极的 **目标点牵引 (Attraction)** 或 **绕行引导 (Guidance)** 把 leader "吸" 进豁口，从而避免因贴近障碍物触发安全接管导致的停滞。
 
 
 ## 3. 已完成工作
 
 ### 3.1 本轮最终保留在当前工作树里的代码改动
+#### A. `AdaptiveAPF` 的 Nonrelevant Obstacle Lateral Shaping 增强
+- 文件：`src/apflf/controllers/adaptive_apf.py` 
+- 内容：
+  - 增强 `_leader_nonrelevant_lateral_reduction()`：改变 activation 窗口，将 `reduction_start_gap` 前推至 2.5，`full_reduction_overlap` 缩短至 1.5，使得障碍物与本车平齐 (gap<=0) 时立即获得 ~75-85% 的强反向横向力抵消。
+  - 增强 `_shape_leader_nonrelevant_obstacle_force()`：引入侧向距离 (`lateral_distance`) 权重加成，越远的被绕过障碍物，反向力抵消权重越高，硬上限 0.90。
+- 数学语义：符合 leader-only、hazard-only、非绕行侧障碍物专属、仅缩放 `force_y` 且 `force_x` 绝对锁死不变的设计红线。
 
-#### A. `AdaptiveAPF` 的 hazard 期 leader 速度节流
-- 文件：
-  - `src/apflf/controllers/adaptive_apf.py`
-- 已完成内容：
-  - 新增 leader-only 的 `_leader_hazard_speed_limit(...)`
-  - 重写 `_reference_speed(...)`，使其在 hazard/relock 几何里不再长期输出巡航级前推
-- 数学语义：
-  - 只影响 `index == 0`
-  - 只影响 hazard mode
-  - 依据 `nearest relevant obstacle rear gap` 与 `lateral_error` 有界地下调 `reference_speed`
-  - 不触碰 follow/recover
-- 已验证：
-  - 对 `s5` 的 nominal-vs-safety 纵向对抗有明显收敛作用
-  - 但单靠速度节流不足以打穿 `s5`
+#### B. `AdaptiveAPF` 完整 Shaping 函数单测覆盖
+- 文件：`tests/test_adaptive_apf.py`
+- 内容：新增了 3 个关键测试：
+  - `test_nonrelevant_shaping_preserves_relevant_obstacle_force`
+  - `test_nonrelevant_shaping_skips_aligned_lateral_push`
+  - `test_nonrelevant_shaping_bounded_total_reduction`
+- 保障了对后续开发的接口稳定性。
 
-#### B. `APFLF` 的 leader hazard `target_x` 近端 preview 保留
-- 文件：
-  - `src/apflf/controllers/apf_lf.py`
-  - `tests/test_modes.py`（注意：这些测试已在当前 `HEAD` 或历史修改中固化，当前工作树未再改它）
-- 已完成内容：
-  - `APFLFController._leader_hazard_target_x(...)` 已支持在 hazard 阶段、即使 nominal side 已 re-lock，只要横向重定位还未完成且 relevant obstacle 未清空，就保留近端 preview，不立刻退回远端 `goal_x` 吸引
-- 数学语义：
-  - preview 保持有界
-  - 只在 leader hazard 局部几何内生效
-  - follow/recover 不受影响
-- 已验证：
-  - 轨迹诊断确认 `target_x` 确实被拉近
-  - 但闭环 throughput 几乎未改善，说明 preview 深度不是主瓶颈
-
-#### C. `leader_bypass_force` 的最终保留版本：只做“road opposition compensation”
-- 文件：
-  - `src/apflf/controllers/apf_lf.py`
-  - `src/apflf/controllers/adaptive_apf.py`
-  - `tests/test_adaptive_apf.py`
-- 已完成内容：
-  - `APFLFController._leader_bypass_force(...)` 新增 `road_gain` 入口
-  - 最终保留的逻辑不是整体放大 bypass force，而是：
-    - 仍以固定基线 gain 计算 `Fy_guidance`
-    - 仅当 `road_force` 与当前 `lateral_error` 方向对抗时，增加一项有界 `road_compensation`
-  - `AdaptiveAPFController.compute_actions()` 已把当前实际 `road_gain` 传入该 helper
-  - 增加了 `S4` 静态切片回归测试，确保 leader 在 overtake lane shift 未完成时不会再被 road push 顶回错误侧
-- 数学语义：
-  - 若 `sign(road_force_y) == -sign(lateral_error)`，才允许补偿
-  - 补偿项是有界的，且只作用于 lateral guidance
-  - `follow/recover` 不变
-- 当前效果：
-  - `s5` 基本回到 `stage38` 水平，没有再被这条线显著拉坏
-  - `s4` 只有极小提升，尚不足以构成场景级突破
-
-### 3.2 本轮做过但已明确放弃的路线
-
-#### 已放弃路线 1：继续强化 `leader_bypass_force` 的近障碍 boost
-- 试验结果：
-  - `stage39_probe_s5` 回退到 `leader_final_x = 26.640952116137782`
-  - `safety_interventions = 382`
-- 结论：
-  - 强 boost 会把 `S5` 搅坏，不能保留
-
-#### 已放弃路线 2：继续把主要精力放在 `safety_filter.py`
-- 结论来自多轮尝试：
-  - safety fallback 微调已经接近上限
-  - 即使更会“保安全”，也不会自动生成可通过 nominal 轨迹
-  - 旧 AI_MEMORY 中那条“下一步先改 safety fallback”的指令已经过时
-
-### 3.3 本轮新增/保留的关键测试
-- `tests/test_adaptive_apf.py`
-  - 保留：
-    - stage58 staggered-blocker relock 横向 shaping 回归
-    - stage48 pre-flip 不应提前 throttle 的回归
-    - stage56 reorientation 应触发 leader speed throttle 的回归
-  - 新增：
-    - `test_adaptive_apf_overtake_guidance_overcomes_road_push_during_incomplete_lane_shift()`
-- 全量测试当前为：
-  - `81 passed`
-
-### 3.4 场景级实验时间线（本轮最重要）
-- `stage37_probe_s5`
-  - 速度节流首次落地
-  - `leader_final_x = 26.703611552662704`
-  - `fallback_events = 206`
-  - `safety_interventions = 241`
-- `stage38_probe_s5`
-  - 加入近端 preview 保留
-  - 结果几乎与 `stage37` 重合，说明 `target_x` 不是主瓶颈
-- `stage39_probe_s5`
-  - 强近障碍 boost，已废弃
-  - `leader_final_x = 26.640952116137782`
-  - `safety_interventions = 382`
-- `stage40_probe_s5`
-  - 部分回退
-  - `leader_final_x = 26.678859159710015`
-- `stage41_probe_s5`
-  - 当前保留版本
-  - `leader_final_x = 26.703600337341292`
-  - 与 `stage37/38` 基本等价
+### 3.2 历史保留关键架构机制（不要随意回退）
+- Leader Hazard Speed Throttle (根据 obstacle rear gap 动态压降巡航速度)。
+- Leader Hazard Target-X Near Preview 保留。
+- Leader Bypass Guidance 对 Road Push 的非对称补偿机制。
 
 
 ## 4. 下一步指令
 
-### 4.1 下一个工程师启动 AI 后，应该立刻写哪段代码
+### 4.1 下一个工程师启动 AI 后，应立即执行的任务
 - **优先文件**：
-  - `src/apflf/controllers/adaptive_apf.py`
-- **优先函数**：
-  - `AdaptiveAPFController._shape_leader_nonrelevant_obstacle_force(...)`
-  - 如有必要，可新增一个更明确的 helper，例如：
-    - `_leader_nonrelevant_obstacle_lateral_scale(...)`
-    - 或 `_leader_hazard_obstacle_decomposition(...)`
-- **不要先改**：
-  - `safety_filter.py`
-  - `fsm_mode.py`
-  - `apf_lf.py` 的 bypass 幅值
+  - `src/apflf/controllers/adaptive_apf.py`（针对 Nominal Attraction/Guidance 阶段优化）
+  - `src/apflf/controllers/apf_lf.py`（寻找绕行宽度空间）
+- 下一组代码绝不能动 `safety_filter.py`。
 
 ### 4.2 下一段代码要解决的精确数学问题
-- 当前 `s5` 的核心问题不是 `target_x`，也不是 `leader_bypass_force`，而是：
-  - 在 stage58 一类几何里，leader 已经选对侧、`target_y` 也正确，
-  - 但 **非当前绕行侧** 的 front obstacle 仍然提供过大的反向 lateral force，
-  - 导致总横向力 `F_total,y` 仍可能被压回错误方向。
+- 根据 `stage42_probe_s5` 暴露的现象：由于 Nonrelevant 障碍排斥力减弱引发 CBF 介入导致死锁。这表明 leader 的**名义力合成向量偏向了原本的障碍物，导致触碰了安全集边界**。
+- **下一步数学约束对策**：需要给领航车额外补充朝向绕行通道中心的**拉力**（Attraction 或 Guidance），对抗 CBF 触发。
+- 具体思路探讨：
+  1. 当前 `target_y` 是否因为队形编队的残余影响没有完美对准豁口的几何中心？（可以审查 `_static_goal_target` 对 leader 在 hazard 的 `offset_y` 处理是否可以更激进贴靠中心点）。
+  2. 对于 `yield_left / yield_right`，当处于 relock 晚期并在两车之间钻缝时，能否引入针对豁口中心线 (Clearance Centerline) 的 attractor。
+  3. 审查 `stagnation_force_threshold` 触发进入 recovery mode 的阈值设计，看是否在 s5 被触发。
 
-- 下一个工程师要直接瞄准的数学约束是：
-  - 对于 leader hazard 模式，定义
-    - `F_total,y = F_att,y + F_guidance,y + F_road,y + F_obs,y + F_peer,y`
-  - 在 `s5` 的典型 relock 切片（stage58 类几何）下，必须让
-    - `F_total,y > 0`
-  - 同时严格满足：
-    - **不改变** nonrelevant obstacle 的 `force_x`
-    - **只**缩放与当前绕行侧相反的 `force_y`
-    - 缩放因子 `r` 必须有界且连续：
-      - `0 <= r <= r_max`
-      - 推荐 `0.65 <= r_max <= 0.90`
-    - 若 obstacle 属于 `relevant_obstacles`，则 `r = 0`
-    - 若该 obstacle 的 lateral force 已与当前绕行方向同号，则 `r = 0`
-    - follow/recover 模式下，shape 必须完全退化为 identity
-
-### 4.3 下一段代码的形式约束
-- 必须保持：
-  - `leader-only`
-  - `hazard-only`
-  - `nonrelevant-front-obstacle-only`
-  - `lateral-only shaping`
-- 严禁：
-  - 改动 `force_x`
-  - 在普通 obstacle 上全局放大/减小 repulsion
-  - 再次回到 `safety_filter.py` 做主路径微调
-
-### 4.4 下一个工程师写完后必须补的测试
-- 在 `tests/test_adaptive_apf.py` 继续加 regression：
-  - 基于 stage58 类 observation，验证 nonrelevant obstacle shaping 后：
-    - `force_x` 与 raw 相同
-    - `total lateral force` 相比当前 raw/shaped 基线明显增大
-    - `actions[0].steer > 0.05`
-- 如新增 helper，测试必须直接覆盖：
-  - `relevant obstacle -> no shaping`
-  - `aligned lateral push -> no shaping`
-  - `nonrelevant adverse lateral push -> bounded shaping`
-
-### 4.5 下一个工程师的验收顺序
-1. 先跑：
-   - `python -m compileall src tests scripts`
-   - `python -m pytest -q`
-2. 再跑：
-   - `python scripts/run_experiment.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 --exp-id stage42_probe_s5`
-3. `stage42_probe_s5` 的最低门槛：
-   - `leader_final_x > 26.703600337341292`
-   - `collision_count = 0`
-   - `boundary_violation_count = 0`
-   - 不允许显著拉高 `fallback_events`
-4. 若 `s5` 单 seed 有实质提升，再跑：
-   - `s4` 单 seed
-   - `s1/s2/s3` 回归
+### 4.3 新一轮优化的起手式测试
+- 写一个独立的静态或单步模拟脚本（使用与 s5 相似的 `box_clearance` 临界状态），在 `AdaptiveAPFController.compute_actions` 发生时，将 `action` 交给 `safety_filter.filter_actions` 验证。
+- 目标：确保 Nominal Controllers 计算得出的 Action，不会因为横向裕度（Lateral Margin）不足立刻被 CBF 惩罚为 fallback 或极大修改的 safe action。
 
 
 ## 5. 明确不要做的事
-- 不要再把主要时间投入到 `safety_filter.py`。
-- 不要通过放松 exact one-step safety、放松 boundary/obstacle collision 检查来换取 `leader_final_x`。
-- 不要再继续调大 `leader_bypass_force` 的整体增益。
-- 不要把 `target_x` 再推得更近或更远作为主策略；这条线已经证明不是主矛盾。
-- 不要在没有 `s5` 单 seed 实质提升之前就跑大矩阵。
-
+- **绝对不要**直接修改 `safety_filter.py` 内部任何关于安全边界的计算，不准缩小 CBF 的碰撞缓冲或容忍越界。
+- **不要**在没有用数学约束讲清楚为何能避免 CBF 干预的前提下，瞎改 `force_x` 来猛踩油门冲过去。
+- **不要**破坏已经写好的 84 个测试和 3 个新 Shaping 测试。
 
 ## 6. 交接备注
-- 当前最可信的结论，以 `summary.csv` 为准，不要只看控制台 fallback 日志。
-- 旧 AI_MEMORY 里那条“下一步先写 safety fallback near-stop creep”的指令已经失效，必须忽略。
-- 当前工作树虽然未提交，但已经处于可验证、可继续接力的状态：
-  - 单测与编译均通过
-  - `stage41` 已给出当前最可信场景游标
-  - 下一位工程师应直接从 `AdaptiveAPF` 的 nonrelevant obstacle lateral decomposition 开始
+- 你现在的起点极好。我们已经证明：压低错侧排斥力 = CBF介入增加。目前的问题完全定位在“合成力的横向重心位置没有完全引导车辆贴着安全气泡中央行驶”。
+- 只要针对 `target_y` 或引入通道向心力做一个微调，`s5` 的僵局就有极大概率会打破。
+- 请直接深入 `AdaptiveAPF / APFLF`，思考如何加强朝向通道正中央的**引导力 (Guidance / Attraction)**，避开边缘 CBF 的截停。

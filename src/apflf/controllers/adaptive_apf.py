@@ -181,8 +181,8 @@ class AdaptiveAPFController(APFLFController):
         state_front_x = state.x + 0.5 * self.config.vehicle_length
         obstacle_rear_x = obstacle.x - 0.5 * obstacle.length
         rear_gap = obstacle_rear_x - state_front_x
-        reduction_start_gap = 1.2
-        full_reduction_overlap = 1.8
+        reduction_start_gap = 2.5
+        full_reduction_overlap = 1.5
         if rear_gap >= reduction_start_gap:
             return 0.0
         activation = float(
@@ -193,7 +193,7 @@ class AdaptiveAPFController(APFLFController):
             )
         )
         smooth_activation = activation * activation * (3.0 - 2.0 * activation)
-        return 0.65 * smooth_activation
+        return 0.85 * smooth_activation
 
     def _shape_leader_nonrelevant_obstacle_force(
         self,
@@ -210,6 +210,13 @@ class AdaptiveAPFController(APFLFController):
         reduction = self._leader_nonrelevant_lateral_reduction(state=state, obstacle=obstacle)
         if reduction <= 0.0:
             return force
+        # 当 obstacle 横向中心远离当前绕行路径时，进一步削减反向横向分量
+        lateral_distance = abs(obstacle.y - state.y)
+        lateral_threshold = 0.5 * (obstacle.width + self.config.vehicle_width)
+        if lateral_distance > lateral_threshold:
+            excess = (lateral_distance - lateral_threshold) / max(lateral_threshold, 1e-6)
+            lateral_boost = float(np.clip(0.15 * excess, 0.0, 0.10))
+            reduction = min(reduction + lateral_boost, 0.90)
         return np.asarray([float(force[0]), (1.0 - reduction) * float(force[1])], dtype=float)
 
     def _adaptive_obstacle_force(

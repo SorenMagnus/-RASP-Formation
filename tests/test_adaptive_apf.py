@@ -397,3 +397,101 @@ def test_all_scenario_configs_load_and_step(scenario_name: str) -> None:
 
     assert len(snapshot.obstacles) == len(config.scenario.obstacles)
     assert len(snapshot.states) == config.scenario.vehicle_count
+
+
+def test_nonrelevant_shaping_preserves_relevant_obstacle_force() -> None:
+    """Relevant obstacles must never be shaped — shaping factor r must equal 0."""
+
+    controller = _make_controller()
+    # Obstacle on the left (y=2.0) is relevant when side_sign > 0 (yield_left)
+    # because it sits at center_y ± relevant_threshold.
+    observation = Observation(
+        step_index=60,
+        time=6.0,
+        states=(
+            State(x=25.0, y=-0.5, yaw=0.0, speed=1.5),
+            State(x=17.0, y=-1.0, yaw=0.0, speed=1.4),
+            State(x=9.0, y=-0.8, yaw=0.0, speed=1.3),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            # This obstacle is near center_y (y=-0.3), relevant for yield_left (side_sign=+1)
+            ObstacleState("center_blocker", 30.0, -0.3, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+
+    raw_force = controller._sum_obstacle_forces(
+        observation=observation, index=0, repulsive_gain=17.5,
+    )
+    shaped_force = controller._adaptive_obstacle_force(
+        observation=observation, index=0, mode=mode, repulsive_gain=17.5,
+    )
+
+    # Relevant obstacle → no shaping at all
+    assert shaped_force[0] == pytest.approx(raw_force[0], abs=1e-9)
+    assert shaped_force[1] == pytest.approx(raw_force[1], abs=1e-9)
+
+
+def test_nonrelevant_shaping_skips_aligned_lateral_push() -> None:
+    """When a nonrelevant obstacle's lateral push already favours the bypass side, shaping must not activate."""
+
+    controller = _make_controller()
+    # Obstacle far above (y=3.0) pushes the leader downward (negative y force).
+    # With yield_right (side_sign=-1), downward push is ALIGNED → no shaping needed.
+    observation = Observation(
+        step_index=62,
+        time=6.2,
+        states=(
+            State(x=25.0, y=0.0, yaw=0.0, speed=1.5),
+            State(x=17.0, y=-1.0, yaw=0.0, speed=1.4),
+            State(x=9.0, y=-0.8, yaw=0.0, speed=1.3),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("upper_blocker", 30.0, 3.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    raw_force = controller._sum_obstacle_forces(
+        observation=observation, index=0, repulsive_gain=17.5,
+    )
+    shaped_force = controller._adaptive_obstacle_force(
+        observation=observation, index=0, mode=mode, repulsive_gain=17.5,
+    )
+
+    # Aligned push → identity
+    assert shaped_force[0] == pytest.approx(raw_force[0], abs=1e-9)
+    assert shaped_force[1] == pytest.approx(raw_force[1], abs=1e-9)
+
+
+def test_nonrelevant_shaping_bounded_total_reduction() -> None:
+    """Total reduction must stay ≤ 0.90, and force_x must be exactly preserved."""
+
+    controller = _make_controller()
+    state = State(x=25.0, y=-0.7, yaw=-0.2, speed=1.4)
+    # Very far lateral obstacle that is nonrelevant: y=3.0, leader at y=-0.7
+    obstacle = ObstacleState("far_upper", 30.0, 3.0, 0.0, 0.0, 4.8, 2.0)
+
+    raw_force = controller._obstacle_force(state, obstacle, repulsive_gain=17.5)
+
+    # side_sign = +1 (yield_left), force_y from upper obstacle is negative (pushes down) → adverse
+    shaped_force = controller._shape_leader_nonrelevant_obstacle_force(
+        state=state,
+        obstacle=obstacle,
+        side_sign=1.0,
+        force=raw_force,
+    )
+
+    # force_x exactly preserved
+    assert shaped_force[0] == pytest.approx(float(raw_force[0]), abs=1e-9)
+    # force_y magnitude reduced but not zeroed (reduction ≤ 0.90 means ≥ 10% remains)
+    assert abs(float(shaped_force[1])) >= 0.10 * abs(float(raw_force[1])) - 1e-9
+    # force_y magnitude strictly less than raw (shaping did activate)
+    if abs(float(raw_force[1])) > 1e-9:
+        assert abs(float(shaped_force[1])) < abs(float(raw_force[1]))
