@@ -16,7 +16,7 @@ from apflf.env.scenarios import ScenarioFactory
 from apflf.safety.safety_filter import PassThroughSafetyFilter
 from apflf.sim.world import World
 from apflf.utils.config import load_config
-from apflf.utils.types import ControllerConfig, InputBounds, RoadGeometry
+from apflf.utils.types import ControllerConfig, InputBounds, Observation, ObstacleState, RoadGeometry, State
 
 
 def _make_controller_config(kind: str = "adaptive_apf") -> ControllerConfig:
@@ -149,6 +149,47 @@ def test_stagnation_detection_has_basic_anti_chattering() -> None:
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is False
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is True
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is False
+
+
+def test_adaptive_apf_tapers_nonrelevant_obstacle_lateral_push_after_local_relock() -> None:
+    """The leader should keep steering toward the relocked side in the stage58 staggered-blocker geometry."""
+
+    controller = _make_controller()
+    observation = Observation(
+        step_index=58,
+        time=5.8,
+        states=(
+            State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+            State(x=17.40, y=-1.05, yaw=0.08, speed=1.55),
+            State(x=9.50, y=-0.84, yaw=0.01, speed=1.40),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+
+    raw_obstacle_force = controller._sum_obstacle_forces(
+        observation=observation,
+        index=0,
+        repulsive_gain=17.5,
+    )
+    shaped_obstacle_force = controller._adaptive_obstacle_force(
+        observation=observation,
+        index=0,
+        mode=mode,
+        repulsive_gain=17.5,
+    )
+    actions = controller.compute_actions(observation, mode=mode)
+
+    assert shaped_obstacle_force[0] == pytest.approx(raw_obstacle_force[0])
+    assert shaped_obstacle_force[1] > raw_obstacle_force[1]
+    assert actions[0].steer > 0.05
+
 
 def test_scenario_config_extends_and_adaptive_controller_runs_one_step() -> None:
     """典型障碍场景配置应能通过 extends 加载并完成一步仿真。"""

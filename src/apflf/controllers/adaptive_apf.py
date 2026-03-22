@@ -9,6 +9,7 @@ import numpy as np
 
 from apflf.controllers.apf_lf import APFLFController
 from apflf.controllers.apf_st import spatio_temporal_factor
+from apflf.decision.mode_base import parse_mode_label
 from apflf.utils.types import Action, Observation, ObstacleState, State
 
 
@@ -169,6 +170,122 @@ class AdaptiveAPFController(APFLFController):
             sign = -math.copysign(1.0, centerline_error)
         return np.asarray([0.0, sign * 0.6 * self.config.road_gain], dtype=float)
 
+    def _leader_nonrelevant_lateral_reduction(
+        self,
+        *,
+        state: State,
+        obstacle: ObstacleState,
+    ) -> float:
+        """Smoothly taper the adverse lateral push from a nearly cleared non-relevant blocker."""
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        obstacle_rear_x = obstacle.x - 0.5 * obstacle.length
+        rear_gap = obstacle_rear_x - state_front_x
+        reduction_start_gap = 1.2
+        full_reduction_overlap = 1.8
+        if rear_gap >= reduction_start_gap:
+            return 0.0
+        activation = float(
+            np.clip(
+                (reduction_start_gap - rear_gap) / max(reduction_start_gap + full_reduction_overlap, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        smooth_activation = activation * activation * (3.0 - 2.0 * activation)
+        return 0.65 * smooth_activation
+
+    def _shape_leader_nonrelevant_obstacle_force(
+        self,
+        *,
+        state: State,
+        obstacle: ObstacleState,
+        side_sign: float,
+        force: np.ndarray,
+    ) -> np.ndarray:
+        """Keep longitudinal repulsion intact while tapering only the adverse lateral component."""
+
+        if side_sign * float(force[1]) >= 0.0:
+            return force
+        reduction = self._leader_nonrelevant_lateral_reduction(state=state, obstacle=obstacle)
+        if reduction <= 0.0:
+            return force
+        return np.asarray([float(force[0]), (1.0 - reduction) * float(force[1])], dtype=float)
+
+    def _adaptive_obstacle_force(
+        self,
+        *,
+        observation: Observation,
+        index: int,
+        mode: str,
+        repulsive_gain: float,
+    ) -> np.ndarray:
+        """Apply leader-only hazard shaping to obstacle repulsion and keep all other cases unchanged."""
+
+        if index != 0:
+            return self._sum_obstacle_forces(
+                observation=observation,
+                index=index,
+                repulsive_gain=repulsive_gain,
+            )
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return self._sum_obstacle_forces(
+                observation=observation,
+                index=index,
+                repulsive_gain=repulsive_gain,
+            )
+
+        state = observation.states[index]
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        if not front_obstacles:
+            return self._sum_obstacle_forces(
+                observation=observation,
+                index=index,
+                repulsive_gain=repulsive_gain,
+            )
+
+        side_sign = self._leader_behavior_side_sign(
+            observation,
+            state,
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return self._sum_obstacle_forces(
+                observation=observation,
+                index=index,
+                repulsive_gain=repulsive_gain,
+            )
+
+        relevant_obstacles = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        if not relevant_obstacles:
+            return self._sum_obstacle_forces(
+                observation=observation,
+                index=index,
+                repulsive_gain=repulsive_gain,
+            )
+
+        front_ids = {obstacle.obstacle_id for obstacle in front_obstacles}
+        relevant_ids = {obstacle.obstacle_id for obstacle in relevant_obstacles}
+        total = np.zeros(2, dtype=float)
+        for obstacle in observation.obstacles:
+            force = self._obstacle_force(state, obstacle, repulsive_gain=repulsive_gain)
+            if obstacle.obstacle_id in front_ids and obstacle.obstacle_id not in relevant_ids:
+                force = self._shape_leader_nonrelevant_obstacle_force(
+                    state=state,
+                    obstacle=obstacle,
+                    side_sign=side_sign,
+                    force=force,
+                )
+            total += force
+        return total
+
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """输出风险自适应 APF-LF 名义控制。"""
 
@@ -220,9 +337,10 @@ class AdaptiveAPFController(APFLFController):
             formation_force = self._formation_force(observation, index, mode)
             consensus_force = self._consensus_force(observation, index, mode)
             road_force = self._road_force(state, road_gain=road_gain)
-            obstacle_force = self._sum_obstacle_forces(
+            obstacle_force = self._adaptive_obstacle_force(
                 observation=observation,
                 index=index,
+                mode=mode,
                 repulsive_gain=repulsive_gain,
             )
             peer_force = self._sum_peer_forces(
