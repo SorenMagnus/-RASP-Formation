@@ -77,6 +77,28 @@ def _make_controller() -> AdaptiveAPFController:
     )
 
 
+def _make_stage5_observation(*, step_index: int, time: float, leader_state: State) -> Observation:
+    """Construct a compact stage5-style staggered-blocker observation for leader regression tests."""
+
+    controller = _make_controller()
+    return Observation(
+        step_index=step_index,
+        time=time,
+        states=(
+            leader_state,
+            State(x=leader_state.x - 7.9, y=-1.05, yaw=0.08, speed=max(leader_state.speed, 1.0)),
+            State(x=leader_state.x - 15.8, y=-0.84, yaw=0.01, speed=max(leader_state.speed - 0.1, 0.8)),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "kind",
     ["formation_cruise", "apf", "st_apf", "apf_lf", "adaptive_apf", "dwa", "orca"],
@@ -189,6 +211,49 @@ def test_adaptive_apf_tapers_nonrelevant_obstacle_lateral_push_after_local_reloc
     assert shaped_obstacle_force[0] == pytest.approx(raw_obstacle_force[0])
     assert shaped_obstacle_force[1] > raw_obstacle_force[1]
     assert actions[0].steer > 0.05
+
+
+def test_adaptive_apf_keeps_full_leader_reference_speed_before_local_flip() -> None:
+    """Early hazard motion should not be throttled when the leader is still aligned with the nominal side."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=48,
+        time=4.8,
+        leader_state=State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+    )
+
+    reference_speed = controller._reference_speed(
+        observation,
+        index=0,
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+
+    assert reference_speed == pytest.approx(controller.target_speed)
+
+
+def test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_reorientation() -> None:
+    """Once the staggered blocker forces a large lateral reorientation, the leader should stop commanding cruise speed."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=56,
+        time=5.6,
+        leader_state=State(x=25.02, y=-0.77, yaw=-0.27, speed=1.58),
+    )
+
+    reference_speed = controller._reference_speed(
+        observation,
+        index=0,
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+    actions = controller.compute_actions(
+        observation,
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+
+    assert reference_speed < 3.0
+    assert actions[0].accel < 0.5
 
 
 def test_scenario_config_extends_and_adaptive_controller_runs_one_step() -> None:

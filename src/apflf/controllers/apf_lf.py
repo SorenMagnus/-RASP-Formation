@@ -186,13 +186,55 @@ class APFLFController(LeaderFollowerMixin, APFController):
         mode: str | None,
         side_sign: float,
         relevant_obstacles: tuple[ObstacleState, ...],
+        target_y: float | None = None,
     ) -> float:
         """为 hazard 绕行阶段选择近端 waypoint，减少远端 goal_x 对横向转向的稀释。"""
 
+        far_preview_x = float(
+            min(
+                observation.goal_x,
+                state.x + max(self.config.obstacle_influence_distance, 2.5 * self.config.vehicle_length),
+            )
+        )
         nominal_side_sign = self._mode_behavior_side_sign(mode)
         if nominal_side_sign is None or nominal_side_sign == side_sign:
-            preview_distance = max(self.config.obstacle_influence_distance, 2.5 * self.config.vehicle_length)
-            return float(min(observation.goal_x, state.x + preview_distance))
+            if not relevant_obstacles:
+                return far_preview_x
+
+            if target_y is None:
+                target_y = self._leader_behavior_target_y(observation, state, mode)
+            if target_y is None:
+                return far_preview_x
+
+            lateral_error = abs(float(target_y - state.y))
+            lateral_trigger = max(0.35 * self.config.vehicle_width, 0.18 * observation.road.half_width)
+            if lateral_error <= lateral_trigger:
+                return far_preview_x
+
+            nearest_obstacle = min(
+                relevant_obstacles,
+                key=lambda obstacle: obstacle.x - 0.5 * obstacle.length,
+            )
+            state_front_x = state.x + 0.5 * self.config.vehicle_length
+            rear_gap = nearest_obstacle.x - 0.5 * nearest_obstacle.length - state_front_x
+            preview_engage_distance = max(0.55 * self.config.obstacle_influence_distance, 2.0 * self.config.vehicle_length)
+            activation = float(
+                np.clip(
+                    (preview_engage_distance - rear_gap) / max(preview_engage_distance, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            if activation <= 0.0:
+                return far_preview_x
+
+            near_preview_x = float(
+                min(
+                    observation.goal_x,
+                    max(state.x + 1.0 * self.config.vehicle_length, nearest_obstacle.x),
+                )
+            )
+            return float((1.0 - activation) * far_preview_x + activation * near_preview_x)
 
         if not relevant_obstacles:
             return observation.goal_x
@@ -345,6 +387,7 @@ class APFLFController(LeaderFollowerMixin, APFController):
                     mode=mode,
                     side_sign=side_sign,
                     relevant_obstacles=relevant_obstacles,
+                    target_y=target_y,
                 )
         if target_y is None:
             target_y = observation.road.lane_center_y

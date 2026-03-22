@@ -286,6 +286,81 @@ class AdaptiveAPFController(APFLFController):
             total += force
         return total
 
+    def _leader_hazard_speed_limit(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        base_target_speed: float,
+    ) -> float:
+        """Throttle leader forward speed in hazard traversal when lateral reorientation is still incomplete."""
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return base_target_speed
+
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        if not front_obstacles:
+            return base_target_speed
+
+        side_sign = self._leader_behavior_side_sign(
+            observation,
+            state,
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return base_target_speed
+
+        relevant_obstacles = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        if not relevant_obstacles:
+            return base_target_speed
+
+        target_y = self._leader_behavior_target_y(observation, state, mode)
+        if target_y is None:
+            return base_target_speed
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        lateral_error = abs(float(target_y - state.y))
+        local_flip_active = nominal_side_sign is not None and nominal_side_sign != side_sign
+        if not local_flip_active and lateral_error <= 0.50 * self.config.vehicle_width:
+            return base_target_speed
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nearest_gap = min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in relevant_obstacles
+        )
+        engage_distance = max(0.25 * self.config.obstacle_influence_distance, 1.0 * self.config.vehicle_length)
+        if nearest_gap >= engage_distance:
+            return base_target_speed
+
+        max_brake = max(abs(self.bounds.accel_min), 1e-6)
+        gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * max(nearest_gap, 0.0)))
+        lateral_window = max(1.5 * self.config.vehicle_width, 0.5 * observation.road.half_width)
+        alignment_scale = 1.0 / (1.0 + lateral_error / max(lateral_window, 1e-6))
+        hazard_speed_cap = max(0.60, gap_speed * alignment_scale)
+        if local_flip_active:
+            hazard_speed_cap = min(hazard_speed_cap, state.speed + 0.35)
+        return float(min(base_target_speed, hazard_speed_cap))
+
+    def _reference_speed(self, observation: Observation, index: int, mode: str) -> float:
+        """Construct reference speed with an extra leader hazard-speed governor for adaptive control."""
+
+        base_target_speed = super()._reference_speed(observation, index, mode)
+        if index != 0:
+            return base_target_speed
+        return self._leader_hazard_speed_limit(
+            observation=observation,
+            state=observation.states[index],
+            mode=mode,
+            base_target_speed=base_target_speed,
+        )
+
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """输出风险自适应 APF-LF 名义控制。"""
 

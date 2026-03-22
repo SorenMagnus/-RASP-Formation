@@ -796,6 +796,49 @@ def test_apf_lf_leader_goal_target_builds_a_true_bypass_offset() -> None:
     assert target[1] < -2.0
 
 
+def test_apf_lf_leader_goal_target_temporarily_uses_near_preview_while_overtake_shift_is_incomplete() -> None:
+    road = Road(RoadGeometry(length=160.0, lane_center_y=0.0, half_width=3.5))
+    controller = APFLFController(
+        config=_controller_config(),
+        bounds=InputBounds(
+            accel_min=-2.5,
+            accel_max=2.0,
+            steer_min=-0.5,
+            steer_max=0.5,
+            speed_min=0.0,
+            speed_max=12.0,
+        ),
+        road=road,
+        target_speed=8.0,
+    )
+    observation = Observation(
+        step_index=54,
+        time=5.4,
+        states=(
+            State(x=25.36, y=-1.67, yaw=0.0, speed=2.38),
+            State(x=17.36, y=-1.60, yaw=0.0, speed=2.20),
+            State(x=9.36, y=-1.55, yaw=0.0, speed=2.10),
+        ),
+        road=road.geometry,
+        goal_x=110.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("slow_lead", 32.8, 0.0, 0.0, 2.0, 4.8, 2.0),
+            ObstacleState("side_block", 58.7, 1.8, 0.0, 4.2, 4.6, 2.0),
+        ),
+    )
+
+    target = controller._leader_goal_target(
+        observation,
+        observation.states[0],
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+
+    assert target[0] >= observation.states[0].x + controller.config.vehicle_length
+    assert target[0] < 36.0
+    assert target[1] < -2.0
+
+
 def test_apf_lf_leader_goal_target_can_flip_locally_when_staggered_blocker_changes_side() -> None:
     road = Road(RoadGeometry(length=175.0, lane_center_y=0.0, half_width=3.5))
     controller = APFLFController(
@@ -919,7 +962,8 @@ def test_apf_lf_leader_goal_target_respects_relocked_left_side() -> None:
         mode="topology=diamond|behavior=yield_left|gain=cautious",
     )
 
-    assert target[0] > observation.states[0].x + 10.0
+    assert target[0] >= observation.states[0].x + controller.config.vehicle_length
+    assert target[0] < observation.states[0].x + 10.0
     assert target[1] > 0.0
 
 
