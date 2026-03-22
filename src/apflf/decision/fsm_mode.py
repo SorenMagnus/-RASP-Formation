@@ -70,6 +70,11 @@ class FSMModeDecision(ModeDecisionModule):
         current_mode = parse_mode_label(self._current_mode)
         current_side = self._behavior_side(current_mode.behavior)
         preferred_side = self._locked_side or current_side or hazard.preferred_side
+        if self._locked_side is not None or current_side is not None:
+            preferred_side = self._maybe_flip_locked_side(
+                observation,
+                side=preferred_side,
+            )
         active_front_obstacle = hazard.has_front_obstacle
         if self._hazard_memory_active and self._locked_side is not None:
             active_front_obstacle = self._has_active_front_obstacle(
@@ -262,6 +267,57 @@ class FSMModeDecision(ModeDecisionModule):
             if self._front_obstacles(observation, state=state, side=side):
                 return True
         return False
+
+    def _leader_side_relevant_obstacles(
+        self,
+        observation: Observation,
+        *,
+        side: str,
+    ) -> tuple[ObstacleState, ...]:
+        leader = observation.states[0]
+        front_obstacles = self._front_obstacles(observation, state=leader)
+        center_y = observation.road.lane_center_y
+        relevant_threshold = 0.5 * self.vehicle_width
+        return tuple(
+            obstacle
+            for obstacle in front_obstacles
+            if (
+                obstacle.y >= center_y - relevant_threshold
+                if side == "right"
+                else obstacle.y <= center_y + relevant_threshold
+            )
+        )
+
+    def _maybe_flip_locked_side(self, observation: Observation, *, side: str) -> str:
+        alternate_side = "left" if side == "right" else "right"
+        leader = observation.states[0]
+        center_y = observation.road.lane_center_y
+        lateral_commitment = center_y - leader.y if side == "right" else leader.y - center_y
+        commitment_threshold = max(0.34 * self.vehicle_width, 0.18 * observation.road.half_width)
+        if lateral_commitment < commitment_threshold:
+            return side
+
+        nominal_relevant = self._leader_side_relevant_obstacles(observation, side=side)
+        alternate_relevant = self._leader_side_relevant_obstacles(observation, side=alternate_side)
+        if not nominal_relevant or not alternate_relevant:
+            return side
+
+        leader_front_x = leader.x + 0.5 * self.vehicle_length
+        nominal_anchor = min(
+            nominal_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - leader_front_x, 0.0),
+        )
+        alternate_anchor = min(
+            alternate_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - leader_front_x, 0.0),
+        )
+        nominal_rear_gap = nominal_anchor.x - 0.5 * nominal_anchor.length - leader_front_x
+        alternate_rear_gap = alternate_anchor.x - 0.5 * alternate_anchor.length - leader_front_x
+        flip_gap_threshold = max(0.12 * self.vehicle_length, 0.55)
+        alternate_lookahead = max(0.5 * self.config.lookahead_distance, 1.5 * self.vehicle_length)
+        if nominal_rear_gap <= flip_gap_threshold and 0.0 <= alternate_rear_gap <= alternate_lookahead:
+            return alternate_side
+        return side
 
     def _obstacle_relevant_to_side(
         self,

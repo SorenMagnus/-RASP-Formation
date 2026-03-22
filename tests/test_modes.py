@@ -238,6 +238,46 @@ def test_fsm_preferred_side_prioritizes_the_nearest_asymmetric_blocker() -> None
     assert hazard.preferred_side == "right"
 
 
+def test_fsm_mode_can_relock_to_the_other_side_once_the_anchor_is_nearly_cleared() -> None:
+    decision = FSMModeDecision(
+        config=_decision_config(hysteresis_steps=1),
+        vehicle_length=4.8,
+        vehicle_width=1.9,
+        safe_distance=0.5,
+    )
+    initial_observation = _observation(
+        leader_x=12.0,
+        leader_speed=5.0,
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+    decision.select_mode(initial_observation)
+    yield_right_mode = decision.select_mode(initial_observation)
+    assert parse_mode_label(yield_right_mode).behavior == "yield_right"
+
+    relock_observation = Observation(
+        step_index=1,
+        time=0.1,
+        states=(
+            State(x=25.02, y=-0.77, yaw=-0.27, speed=1.58),
+            State(x=17.10, y=-1.10, yaw=0.08, speed=1.65),
+            State(x=9.30, y=-0.82, yaw=0.01, speed=1.45),
+        ),
+        road=initial_observation.road,
+        goal_x=80.0,
+        desired_offsets=initial_observation.desired_offsets,
+        obstacles=initial_observation.obstacles,
+    )
+
+    decision.select_mode(relock_observation)
+    relocked_mode = decision.select_mode(relock_observation)
+
+    assert parse_mode_label(relocked_mode).behavior == "yield_left"
+
+
 def test_fsm_mode_transitions_into_recover_after_hazard_clears() -> None:
     decision = FSMModeDecision(
         config=_decision_config(hysteresis_steps=1),
@@ -751,6 +791,8 @@ def test_apf_lf_leader_goal_target_builds_a_true_bypass_offset() -> None:
         mode="topology=diamond|behavior=yield_right|gain=cautious",
     )
 
+    assert target[0] < observation.goal_x
+    assert target[0] >= observation.states[0].x + controller.config.vehicle_length
     assert target[1] < -2.0
 
 
@@ -770,12 +812,12 @@ def test_apf_lf_leader_goal_target_can_flip_locally_when_staggered_blocker_chang
         target_speed=8.5,
     )
     observation = Observation(
-        step_index=48,
-        time=4.8,
+        step_index=56,
+        time=5.6,
         states=(
-            State(x=26.5, y=-0.4, yaw=0.0, speed=3.0),
-            State(x=18.5, y=-0.7, yaw=0.0, speed=2.5),
-            State(x=10.5, y=-0.9, yaw=0.0, speed=2.2),
+            State(x=25.02, y=-0.77, yaw=-0.27, speed=1.58),
+            State(x=17.10, y=-1.10, yaw=0.08, speed=1.65),
+            State(x=9.30, y=-0.82, yaw=0.01, speed=1.45),
         ),
         road=road.geometry,
         goal_x=120.0,
@@ -792,7 +834,133 @@ def test_apf_lf_leader_goal_target_can_flip_locally_when_staggered_blocker_chang
         mode="topology=diamond|behavior=yield_right|gain=cautious",
     )
 
-    assert target[1] > 0.3
+    assert target[0] < observation.goal_x
+    assert target[1] > 0.8
+
+
+def test_apf_lf_leader_goal_target_keeps_forward_preview_before_local_flip() -> None:
+    road = Road(RoadGeometry(length=175.0, lane_center_y=0.0, half_width=3.5))
+    controller = APFLFController(
+        config=_controller_config(),
+        bounds=InputBounds(
+            accel_min=-2.5,
+            accel_max=2.0,
+            steer_min=-0.5,
+            steer_max=0.5,
+            speed_min=0.0,
+            speed_max=12.0,
+        ),
+        road=road,
+        target_speed=8.5,
+    )
+    observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.30, y=-0.75, yaw=0.02, speed=2.30),
+            State(x=7.30, y=-0.55, yaw=0.01, speed=2.10),
+        ),
+        road=road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+    target = controller._leader_goal_target(
+        observation,
+        observation.states[0],
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+
+    assert target[0] > observation.states[0].x + 10.0
+    assert target[0] < observation.goal_x
+    assert target[1] < 0.0
+
+
+def test_apf_lf_leader_goal_target_respects_relocked_left_side() -> None:
+    road = Road(RoadGeometry(length=175.0, lane_center_y=0.0, half_width=3.5))
+    controller = APFLFController(
+        config=_controller_config(),
+        bounds=InputBounds(
+            accel_min=-2.5,
+            accel_max=2.0,
+            steer_min=-0.5,
+            steer_max=0.5,
+            speed_min=0.0,
+            speed_max=12.0,
+        ),
+        road=road,
+        target_speed=8.5,
+    )
+    observation = Observation(
+        step_index=58,
+        time=5.8,
+        states=(
+            State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+            State(x=17.40, y=-1.05, yaw=0.08, speed=1.55),
+            State(x=9.50, y=-0.84, yaw=0.01, speed=1.40),
+        ),
+        road=road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+    target = controller._leader_goal_target(
+        observation,
+        observation.states[0],
+        mode="topology=diamond|behavior=yield_left|gain=cautious",
+    )
+
+    assert target[0] > observation.states[0].x + 10.0
+    assert target[1] > 0.0
+
+
+def test_apf_lf_leader_nominal_steer_turns_positive_early_after_local_side_flip() -> None:
+    road = Road(RoadGeometry(length=175.0, lane_center_y=0.0, half_width=3.5))
+    controller = APFLFController(
+        config=_controller_config(),
+        bounds=InputBounds(
+            accel_min=-2.5,
+            accel_max=2.0,
+            steer_min=-0.5,
+            steer_max=0.5,
+            speed_min=0.0,
+            speed_max=12.0,
+        ),
+        road=road,
+        target_speed=8.5,
+    )
+    observation = Observation(
+        step_index=56,
+        time=5.6,
+        states=(
+            State(x=25.02, y=-0.77, yaw=-0.27, speed=1.58),
+            State(x=17.10, y=-1.10, yaw=0.08, speed=1.65),
+            State(x=9.30, y=-0.82, yaw=0.01, speed=1.45),
+        ),
+        road=road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+    actions = controller.compute_actions(
+        observation,
+        mode="topology=diamond|behavior=yield_right|gain=cautious",
+    )
+
+    assert actions[0].steer > 0.05
 
 
 def test_apf_lf_recovery_speed_limit_keeps_leader_moving_when_team_is_ahead() -> None:

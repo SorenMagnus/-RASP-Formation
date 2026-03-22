@@ -541,10 +541,6 @@ class CBFQPSafetyFilter(SafetyFilter):
         best_steer_delta = math.inf
         best_action_verification_error: str | None = None
         margin_tolerance = 1e-3
-        # Allow a small preview-margin deficit for near-stop creep if the one-step
-        # action is still exactly safe. This helps stalled vehicles complete a low-
-        # speed steering transition instead of freezing at zero speed forever.
-        creep_margin_tolerance = 0.08
         best_safe_action: Action | None = None
         best_safe_correction = math.inf
         best_safe_accel = -math.inf
@@ -572,13 +568,19 @@ class CBFQPSafetyFilter(SafetyFilter):
         best_boundary_recovery_correction = math.inf
         best_boundary_recovery_accel = math.inf
         best_boundary_recovery_steer_delta = math.inf
-        best_creep_action: Action | None = None
-        best_creep_accel = -math.inf
-        best_creep_margin = -math.inf
-        best_creep_steer_delta = math.inf
         guided_steer_sign = self._preferred_hazard_steer_sign(
             state=state,
             observation=observation,
+        )
+        near_stop_guided_creep = self._select_near_stop_guided_creep(
+            state=state,
+            nominal_vector=nominal_vector,
+            observation=observation,
+            ego_index=ego_index,
+            predicted_peer_trajectories=predicted_peer_trajectories,
+            accel_levels=tuple(accel_levels),
+            steer_levels=tuple(float(level) for level in steer_levels),
+            guided_steer_sign=guided_steer_sign,
         )
         guided_mode_active = abs(float(nominal_vector[1])) <= 0.10 and guided_steer_sign != 0.0
         boundary_recovery_tolerance = 0.11
@@ -754,29 +756,6 @@ class CBFQPSafetyFilter(SafetyFilter):
                         best_verified_accel = candidate.accel
                         best_verified_steer_delta = steer_delta
                 if (
-                    state.speed <= 0.25
-                    and candidate.accel > 0.0
-                    and margin >= -creep_margin_tolerance
-                    and verification_error is None
-                ):
-                    if (
-                        candidate.accel > best_creep_accel + 1e-9
-                        or (
-                            abs(candidate.accel - best_creep_accel) <= 1e-9
-                            and (
-                                margin > best_creep_margin + 1e-9
-                                or (
-                                    abs(margin - best_creep_margin) <= 1e-9
-                                    and steer_delta < best_creep_steer_delta - 1e-9
-                                )
-                            )
-                        )
-                    ):
-                        best_creep_action = candidate
-                        best_creep_accel = candidate.accel
-                        best_creep_margin = margin
-                        best_creep_steer_delta = steer_delta
-                if (
                     margin > best_margin + margin_tolerance
                     or (
                         abs(margin - best_margin) <= margin_tolerance
@@ -805,39 +784,120 @@ class CBFQPSafetyFilter(SafetyFilter):
         if best_safe_boundary_action is not None:
             return self._clip_action(best_safe_boundary_action)
         if best_safe_guided_action is not None:
+            if near_stop_guided_creep is not None and best_safe_guided_action.accel <= 0.0:
+                return self._clip_action(near_stop_guided_creep)
             return self._clip_action(best_safe_guided_action)
         if best_safe_action is not None:
-            if (
-                best_creep_action is not None
-                and state.speed <= 0.25
-                and float(nominal_vector[0]) > 0.0
-                and best_safe_action.accel <= 0.0
-            ):
-                return self._clip_action(best_creep_action)
+            if near_stop_guided_creep is not None and best_safe_action.accel <= 0.0:
+                return self._clip_action(near_stop_guided_creep)
             return self._clip_action(best_safe_action)
+        if near_stop_guided_creep is not None:
+            return self._clip_action(near_stop_guided_creep)
         if best_boundary_recovery_action is not None:
             return self._clip_action(best_boundary_recovery_action)
         if (
             best_verified_action is not None
             and best_action_verification_error == "boundary_violation_after_step"
         ):
-            if (
-                best_creep_action is not None
-                and state.speed <= 0.25
-                and float(nominal_vector[0]) > 0.0
-                and best_verified_action.accel <= 0.0
-            ):
-                return self._clip_action(best_creep_action)
             return self._clip_action(best_verified_action)
-        if (
-            best_creep_action is not None
-            and state.speed <= 0.25
-            and float(nominal_vector[0]) > 0.0
-            and (best_action is None or best_action.accel <= 0.0)
-        ):
-            return self._clip_action(best_creep_action)
         if best_action is None:
             return self._clip_action(Action(accel=self.bounds.accel_min, steer=0.0))
+        return self._clip_action(best_action)
+
+    def _select_near_stop_guided_creep(
+        self,
+        *,
+        state: State,
+        nominal_vector: np.ndarray,
+        observation: Observation,
+        ego_index: int,
+        predicted_peer_trajectories: tuple[tuple[State, ...], ...],
+        accel_levels: tuple[float, ...],
+        steer_levels: tuple[float, ...],
+        guided_steer_sign: float,
+    ) -> Action | None:
+        """选择低速重定向蠕动动作，只在 exact one-step 安全下允许小幅 preview deficit。"""
+
+        if state.speed > 0.5 or float(nominal_vector[0]) <= 0.0:
+            return None
+
+        nominal_steer = float(nominal_vector[1])
+        steer_sign = 0.0
+        if abs(nominal_steer) > 1e-6:
+            steer_sign = math.copysign(1.0, nominal_steer)
+        elif guided_steer_sign != 0.0:
+            steer_sign = float(math.copysign(1.0, guided_steer_sign))
+        if steer_sign == 0.0:
+            return None
+
+        epsilon_creep_local = 0.10
+        candidate_accels = sorted(
+            {
+                float(np.clip(level, self.bounds.accel_min, self.bounds.accel_max))
+                for level in (
+                    *accel_levels,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.5,
+                    1.0,
+                    float(nominal_vector[0]),
+                )
+                if level > 0.0
+            }
+        )
+        if not candidate_accels:
+            return None
+
+        best_action: Action | None = None
+        best_accel = -math.inf
+        best_margin = -math.inf
+        best_steer_delta = math.inf
+
+        for accel in candidate_accels:
+            for steer in steer_levels:
+                if steer_sign * steer <= 1e-6:
+                    continue
+                candidate = Action(accel=float(accel), steer=float(steer))
+                verification_error = self._verify_safe_action(
+                    state=state,
+                    safe_action=candidate,
+                    observation=observation,
+                    ego_index=ego_index,
+                    predicted_peer_trajectories=predicted_peer_trajectories,
+                )
+                if verification_error is not None:
+                    continue
+                margin = self._candidate_margin(
+                    state=state,
+                    action=candidate,
+                    observation=observation,
+                    ego_index=ego_index,
+                    predicted_peer_trajectories=predicted_peer_trajectories,
+                )
+                if margin < -epsilon_creep_local:
+                    continue
+                steer_delta = abs(candidate.steer - nominal_steer)
+                if (
+                    candidate.accel > best_accel + 1e-9
+                    or (
+                        abs(candidate.accel - best_accel) <= 1e-9
+                        and (
+                            margin > best_margin + 1e-9
+                            or (
+                                abs(margin - best_margin) <= 1e-9
+                                and steer_delta < best_steer_delta - 1e-9
+                            )
+                        )
+                    )
+                ):
+                    best_action = candidate
+                    best_accel = candidate.accel
+                    best_margin = margin
+                    best_steer_delta = steer_delta
+
+        if best_action is None:
+            return None
         return self._clip_action(best_action)
 
     def _preferred_hazard_steer_sign(

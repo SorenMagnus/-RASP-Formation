@@ -150,7 +150,6 @@ def test_stagnation_detection_has_basic_anti_chattering() -> None:
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is True
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is False
 
-
 def test_scenario_config_extends_and_adaptive_controller_runs_one_step() -> None:
     """典型障碍场景配置应能通过 extends 加载并完成一步仿真。"""
 

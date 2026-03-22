@@ -13,6 +13,14 @@ from apflf.utils.types import Action, Observation, ObstacleState, State
 class APFLFController(LeaderFollowerMixin, APFController):
     """APF-LF 融合控制器。"""
 
+    def _mode_behavior_side_sign(self, mode: str | None) -> float | None:
+        """解析 mode 中的行为侧向符号。"""
+
+        parsed_mode = parse_mode_label(mode or "")
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return None
+        return 1.0 if parsed_mode.behavior.endswith("_left") else -1.0
+
     def _leader_passing_side_margins(
         self,
         observation: Observation,
@@ -63,21 +71,27 @@ class APFLFController(LeaderFollowerMixin, APFController):
         *,
         front_obstacles: tuple[ObstacleState, ...],
     ) -> float | None:
-        parsed_mode = parse_mode_label(mode or "")
-        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+        side_sign = self._mode_behavior_side_sign(mode)
+        if side_sign is None:
             return None
-
-        side_sign = 1.0 if parsed_mode.behavior.endswith("_left") else -1.0
         if not front_obstacles:
+            return side_sign
+
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        if not nominal_relevant:
             return side_sign
 
         state_front_x = state.x + 0.5 * self.config.vehicle_length
         side_switch_obstacles = tuple(
             obstacle
-            for obstacle in front_obstacles
+            for obstacle in nominal_relevant
             if (obstacle.x - 0.5 * obstacle.length - state_front_x) >= (-0.1 * self.config.vehicle_length)
         )
-        anchor_obstacle = side_switch_obstacles[0] if side_switch_obstacles else front_obstacles[0]
+        anchor_obstacle = side_switch_obstacles[0] if side_switch_obstacles else nominal_relevant[0]
         left_margin, right_margin = self._leader_passing_side_margins(
             observation,
             obstacle=anchor_obstacle,
@@ -86,7 +100,112 @@ class APFLFController(LeaderFollowerMixin, APFController):
         alternate_margin = right_margin if side_sign > 0.0 else left_margin
         if preferred_margin < 0.0 and alternate_margin > preferred_margin + 0.15:
             return -side_sign
+        center_y = observation.road.lane_center_y
+        nominal_offset = side_sign * (state.y - center_y)
+        commitment_threshold = max(0.34 * self.config.vehicle_width, 0.18 * observation.road.half_width)
+        if nominal_offset < commitment_threshold:
+            return side_sign
+
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not alternate_relevant:
+            return side_sign
+
+        nominal_anchor = min(
+            nominal_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - state_front_x, 0.0),
+        )
+        alternate_anchor = min(
+            alternate_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - state_front_x, 0.0),
+        )
+        nominal_rear_gap = nominal_anchor.x - 0.5 * nominal_anchor.length - state_front_x
+        alternate_rear_gap = alternate_anchor.x - 0.5 * alternate_anchor.length - state_front_x
+        flip_gap_threshold = max(0.12 * self.config.vehicle_length, 0.55)
+        alternate_lookahead = max(0.5 * self.config.obstacle_influence_distance, 1.5 * self.config.vehicle_length)
+        if nominal_rear_gap <= flip_gap_threshold and 0.0 <= alternate_rear_gap <= alternate_lookahead:
+            return -side_sign
         return side_sign
+
+    def _leader_relevant_obstacles(
+        self,
+        observation: Observation,
+        *,
+        front_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+    ) -> tuple[ObstacleState, ...]:
+        """返回当前绕行侧真正决定局部 waypoint 的障碍物子集。"""
+
+        center_y = observation.road.lane_center_y
+        relevant_threshold = 0.5 * self.config.vehicle_width
+        return tuple(
+            obstacle
+            for obstacle in front_obstacles
+            if (
+                obstacle.y <= center_y + relevant_threshold
+                if side_sign > 0.0
+                else obstacle.y >= center_y - relevant_threshold
+            )
+        )
+
+    def _leader_flip_overshoot(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        side_sign: float,
+        relevant_obstacles: tuple[ObstacleState, ...],
+    ) -> float:
+        """在局部翻边时追加一个有界 overshoot，避免 leader 太晚回收。"""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or nominal_side_sign == side_sign or not relevant_obstacles:
+            return 0.0
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nearest_gap = min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in relevant_obstacles
+        )
+        flip_distance = max(1.25 * self.config.vehicle_length, 0.55 * self.config.obstacle_influence_distance)
+        activation = float(np.clip((flip_distance - nearest_gap) / max(flip_distance, 1e-6), 0.0, 1.0))
+        if activation <= 0.0:
+            return 0.0
+
+        max_overshoot = max(0.55 * self.config.vehicle_width, 0.35 * self.config.road_influence_margin)
+        return float(side_sign * activation * max_overshoot)
+
+    def _leader_hazard_target_x(
+        self,
+        observation: Observation,
+        state: State,
+        *,
+        mode: str | None,
+        side_sign: float,
+        relevant_obstacles: tuple[ObstacleState, ...],
+    ) -> float:
+        """为 hazard 绕行阶段选择近端 waypoint，减少远端 goal_x 对横向转向的稀释。"""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or nominal_side_sign == side_sign:
+            preview_distance = max(self.config.obstacle_influence_distance, 2.5 * self.config.vehicle_length)
+            return float(min(observation.goal_x, state.x + preview_distance))
+
+        if not relevant_obstacles:
+            return observation.goal_x
+
+        nearest_obstacle = min(
+            relevant_obstacles,
+            key=lambda obstacle: obstacle.x - 0.5 * obstacle.length,
+        )
+        local_waypoint_x = max(
+            state.x + 1.0 * self.config.vehicle_length,
+            nearest_obstacle.x,
+        )
+        return float(min(observation.goal_x, local_waypoint_x))
 
     def _leader_behavior_target_y(
         self,
@@ -105,15 +224,10 @@ class APFLFController(LeaderFollowerMixin, APFController):
             return None
 
         center_y = observation.road.lane_center_y
-        relevant_threshold = 0.5 * self.config.vehicle_width
-        relevant_obstacles = tuple(
-            obstacle
-            for obstacle in front_obstacles
-            if (
-                obstacle.y <= center_y + relevant_threshold
-                if side_sign > 0.0
-                else obstacle.y >= center_y - relevant_threshold
-            )
+        relevant_obstacles = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
         )
         if not relevant_obstacles:
             return None
@@ -128,6 +242,13 @@ class APFLFController(LeaderFollowerMixin, APFController):
             else:
                 target_y = min(target_y, candidate_y)
 
+        target_y += self._leader_flip_overshoot(
+            observation=observation,
+            state=state,
+            mode=mode,
+            side_sign=side_sign,
+            relevant_obstacles=relevant_obstacles,
+        )
         max_center_offset = max(observation.road.half_width - 0.55 * self.config.vehicle_width, 0.0)
         return float(np.clip(target_y, center_y - max_center_offset, center_y + max_center_offset))
 
@@ -203,6 +324,28 @@ class APFLFController(LeaderFollowerMixin, APFController):
         if state.x >= observation.goal_x:
             target_x = state.x + max(0.5 * self.config.vehicle_length, 0.25 * max(state.speed, 1.0))
         target_y = self._leader_behavior_target_y(observation, state, mode)
+        parsed_mode = parse_mode_label(mode or "")
+        if parsed_mode.behavior != "follow" and not parsed_mode.behavior.startswith("recover_"):
+            front_obstacles = self._leader_front_obstacles(observation, state)
+            side_sign = self._leader_behavior_side_sign(
+                observation,
+                state,
+                mode,
+                front_obstacles=front_obstacles,
+            )
+            if side_sign is not None:
+                relevant_obstacles = self._leader_relevant_obstacles(
+                    observation,
+                    front_obstacles=front_obstacles,
+                    side_sign=side_sign,
+                )
+                target_x = self._leader_hazard_target_x(
+                    observation,
+                    state,
+                    mode=mode,
+                    side_sign=side_sign,
+                    relevant_obstacles=relevant_obstacles,
+                )
         if target_y is None:
             target_y = observation.road.lane_center_y
         return np.asarray([target_x, target_y], dtype=float)

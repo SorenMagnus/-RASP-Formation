@@ -427,6 +427,117 @@ def test_fallback_allows_small_preview_deficit_for_one_step_safe_creep() -> None
     assert fallback_action.steer > 0.0
 
 
+def test_near_stop_guided_creep_keeps_same_side_and_prioritizes_forward_progress() -> None:
+    """Regression: the dedicated near-stop guided creep branch should keep the steer side and choose a strong admissible accel."""
+
+    road = Road(RoadGeometry(length=175.0, lane_center_y=0.0, half_width=3.5))
+    safety_filter = CBFQPSafetyFilter(
+        config=SafetyConfig(
+            enabled=True,
+            solver="osqp",
+            safe_distance=0.5,
+            barrier_decay=3.0,
+            slack_penalty=1200.0,
+            max_slack=2.0,
+            road_boundary_margin=0.15,
+            fallback_brake=2.5,
+            fallback_steer_gain=0.45,
+        ),
+        bounds=InputBounds(
+            accel_min=-2.5,
+            accel_max=2.0,
+            steer_min=-0.4363323129985824,
+            steer_max=0.4363323129985824,
+            speed_min=0.0,
+            speed_max=12.0,
+        ),
+        road=road,
+        wheelbase=2.8,
+        vehicle_length=4.8,
+        vehicle_width=1.9,
+        dt=0.1,
+    )
+    observation = Observation(
+        step_index=80,
+        time=8.0,
+        states=(
+            State(26.680513486535965, -0.9103407023092039, -0.09893089157088175, 0.09948580353732972),
+            State(19.813199754973773, -1.7187161949723644, 0.2662272812203703, 0.41037254568747716),
+            State(12.891924338118532, 0.7328051713938966, -0.589876430289614, 0.5779897520668271),
+        ),
+        road=road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_cross_1", 57.99999999988568, -15.899999999999963, -1.5707963268, 2.8, 4.4, 1.9),
+            ObstacleState("dense_cross_2", 67.99999999990202, 13.19999999999997, 1.5707963268, 2.4, 4.4, 1.9),
+            ObstacleState("dense_slow", 101.99999999999997, 0.5, 0.0, 3.0, 4.8, 2.0),
+        ),
+    )
+    nominal_actions = (
+        Action(2.0, 0.4363323129985824),
+        Action(-0.5449169235281253, 0.4363323129985824),
+        Action(-0.5998932002505976, -0.4363323129985824),
+    )
+    preview_steps = max(safety_filter._resolve_preview_steps(state) for state in observation.states)
+    predicted_peer_trajectories = tuple(
+        safety_filter._rollout_preview_trajectory(
+            state=state,
+            action=action,
+            steps=preview_steps,
+        )
+        for state, action in zip(observation.states, nominal_actions, strict=True)
+    )
+
+    guided_creep = safety_filter._select_near_stop_guided_creep(
+        state=observation.states[0],
+        nominal_vector=np.asarray(nominal_actions[0].to_array(), dtype=float),
+        observation=observation,
+        ego_index=0,
+        predicted_peer_trajectories=predicted_peer_trajectories,
+        accel_levels=(-2.5, -1.25, 0.0),
+        steer_levels=tuple(
+            float(level)
+            for level in np.linspace(
+                safety_filter.bounds.steer_min,
+                safety_filter.bounds.steer_max,
+                num=13,
+                dtype=float,
+            )
+        ),
+        guided_steer_sign=safety_filter._preferred_hazard_steer_sign(
+            state=observation.states[0],
+            observation=observation,
+        ),
+    )
+
+    assert guided_creep is not None
+    assert guided_creep.accel >= 0.5
+    assert guided_creep.steer * nominal_actions[0].steer > 0.0
+    assert (
+        safety_filter._verify_safe_action(
+            state=observation.states[0],
+            safe_action=guided_creep,
+            observation=observation,
+            ego_index=0,
+            predicted_peer_trajectories=predicted_peer_trajectories,
+        )
+        is None
+    )
+    assert (
+        safety_filter._candidate_margin(
+            state=observation.states[0],
+            action=guided_creep,
+            observation=observation,
+            ego_index=0,
+            predicted_peer_trajectories=predicted_peer_trajectories,
+        )
+        >= -0.10 - 1e-9
+    )
+
+
 def test_fallback_prefers_minimal_intervention_within_safe_candidate_set() -> None:
     """Regression: if multiple preview-safe candidates exist, fallback should not over-brake by default."""
 
