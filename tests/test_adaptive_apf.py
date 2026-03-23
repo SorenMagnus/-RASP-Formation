@@ -256,6 +256,36 @@ def test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_r
     assert actions[0].accel < 0.5
 
 
+def test_adaptive_apf_caps_low_speed_hazard_braking_before_self_stop() -> None:
+    """Near stop, leader hazard control should keep a tiny crawl without switching to positive nominal accel."""
+
+    controller = _make_controller()
+    observation = Observation(
+        step_index=75,
+        time=7.5,
+        states=(
+            State(x=26.630610145654906, y=-0.7868884432306016, yaw=0.06153123751741285, speed=0.04279428232288743),
+            State(x=18.730610145654907, y=-1.05, yaw=0.08, speed=1.0),
+            State(x=10.830610145654905, y=-0.84, yaw=0.01, speed=0.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("dense_static_right", 32.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+
+    actions = controller.compute_actions(
+        observation,
+        mode="topology=diamond|behavior=yield_left|gain=cautious",
+    )
+
+    assert -0.031 <= actions[0].accel <= 0.0
+    assert actions[0].steer > 0.05
+
+
 def test_adaptive_apf_overtake_guidance_overcomes_road_push_during_incomplete_lane_shift() -> None:
     """In the S4-style overtake slice, hazard guidance should keep the leader turning toward the active bypass lane."""
 

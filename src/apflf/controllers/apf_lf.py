@@ -36,6 +36,31 @@ class APFLFController(LeaderFollowerMixin, APFController):
         right_target_y = obstacle.y - inflated_half_width
         return (upper_limit - left_target_y, right_target_y - lower_limit)
 
+    def _leader_nonrelevant_clearance_activation(
+        self,
+        *,
+        state: State,
+        obstacle: ObstacleState,
+    ) -> float:
+        """Return a smooth activation once a non-relevant blocker is locally cleared longitudinally."""
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        obstacle_rear_x = obstacle.x - 0.5 * obstacle.length
+        rear_gap = obstacle_rear_x - state_front_x
+        activation_start_gap = 2.5
+        activation_full_overlap = 1.5
+        if rear_gap >= activation_start_gap:
+            return 0.0
+        raw_activation = float(
+            np.clip(
+                (activation_start_gap - rear_gap)
+                / max(activation_start_gap + activation_full_overlap, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        return float(raw_activation * raw_activation * (3.0 - 2.0 * raw_activation))
+
     def _leader_front_obstacles(
         self,
         observation: Observation,
@@ -150,6 +175,69 @@ class APFLFController(LeaderFollowerMixin, APFController):
                 else obstacle.y >= center_y - relevant_threshold
             )
         )
+
+    def _leader_side_channel_center_y(
+        self,
+        observation: Observation,
+        *,
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+    ) -> float:
+        """Return the centerline of the active passing-side corridor for the ego-vehicle center."""
+
+        center_y = observation.road.lane_center_y
+        upper_limit = center_y + observation.road.half_width - 0.5 * self.config.vehicle_width
+        lower_limit = center_y - observation.road.half_width + 0.5 * self.config.vehicle_width
+        bypass_margin = max(0.45, 0.5 * self.config.road_influence_margin)
+
+        if side_sign > 0.0:
+            corridor_lower = center_y
+            for obstacle in relevant_obstacles:
+                inflated_half_width = (
+                    0.5 * obstacle.width + 0.5 * self.config.vehicle_width + bypass_margin
+                )
+                corridor_lower = max(corridor_lower, obstacle.y + inflated_half_width)
+            corridor_lower = min(corridor_lower, upper_limit)
+            return float(0.5 * (corridor_lower + upper_limit))
+
+        corridor_upper = center_y
+        for obstacle in relevant_obstacles:
+            inflated_half_width = (
+                0.5 * obstacle.width + 0.5 * self.config.vehicle_width + bypass_margin
+            )
+            corridor_upper = min(corridor_upper, obstacle.y - inflated_half_width)
+        corridor_upper = max(corridor_upper, lower_limit)
+        return float(0.5 * (lower_limit + corridor_upper))
+
+    def _leader_channel_centerline_blend(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        front_obstacles: tuple[ObstacleState, ...],
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+    ) -> float:
+        """Blend edge-tracking toward the corridor centerline after the opposite blocker is locally cleared."""
+
+        relevant_ids = {obstacle.obstacle_id for obstacle in relevant_obstacles}
+        blend = 0.0
+        for obstacle in front_obstacles:
+            if obstacle.obstacle_id in relevant_ids:
+                continue
+            blend = max(
+                blend,
+                self._leader_nonrelevant_clearance_activation(
+                    state=state,
+                    obstacle=obstacle,
+                ),
+            )
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is not None and nominal_side_sign != side_sign and relevant_obstacles:
+            blend = max(blend, 0.35)
+        return float(np.clip(blend, 0.0, 1.0))
 
     def _leader_flip_overshoot(
         self,
@@ -275,22 +363,36 @@ class APFLFController(LeaderFollowerMixin, APFController):
             return None
 
         bypass_margin = max(0.45, 0.5 * self.config.road_influence_margin)
-        target_y = center_y
+        edge_target_y = center_y
         for obstacle in relevant_obstacles:
             inflated_half_width = 0.5 * obstacle.width + 0.5 * self.config.vehicle_width + bypass_margin
             candidate_y = obstacle.y + side_sign * inflated_half_width
             if side_sign > 0.0:
-                target_y = max(target_y, candidate_y)
+                edge_target_y = max(edge_target_y, candidate_y)
             else:
-                target_y = min(target_y, candidate_y)
+                edge_target_y = min(edge_target_y, candidate_y)
 
-        target_y += self._leader_flip_overshoot(
+        edge_target_y += self._leader_flip_overshoot(
             observation=observation,
             state=state,
             mode=mode,
             side_sign=side_sign,
             relevant_obstacles=relevant_obstacles,
         )
+        channel_center_y = self._leader_side_channel_center_y(
+            observation,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+        )
+        centerline_blend = self._leader_channel_centerline_blend(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+        )
+        target_y = (1.0 - centerline_blend) * edge_target_y + centerline_blend * channel_center_y
         max_center_offset = max(observation.road.half_width - 0.55 * self.config.vehicle_width, 0.0)
         return float(np.clip(target_y, center_y - max_center_offset, center_y + max_center_offset))
 

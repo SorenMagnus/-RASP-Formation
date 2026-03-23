@@ -178,22 +178,10 @@ class AdaptiveAPFController(APFLFController):
     ) -> float:
         """Smoothly taper the adverse lateral push from a nearly cleared non-relevant blocker."""
 
-        state_front_x = state.x + 0.5 * self.config.vehicle_length
-        obstacle_rear_x = obstacle.x - 0.5 * obstacle.length
-        rear_gap = obstacle_rear_x - state_front_x
-        reduction_start_gap = 2.5
-        full_reduction_overlap = 1.5
-        if rear_gap >= reduction_start_gap:
-            return 0.0
-        activation = float(
-            np.clip(
-                (reduction_start_gap - rear_gap) / max(reduction_start_gap + full_reduction_overlap, 1e-6),
-                0.0,
-                1.0,
-            )
+        return 0.85 * self._leader_nonrelevant_clearance_activation(
+            state=state,
+            obstacle=obstacle,
         )
-        smooth_activation = activation * activation * (3.0 - 2.0 * activation)
-        return 0.85 * smooth_activation
 
     def _shape_leader_nonrelevant_obstacle_force(
         self,
@@ -368,6 +356,39 @@ class AdaptiveAPFController(APFLFController):
             base_target_speed=base_target_speed,
         )
 
+    def _leader_low_speed_braking_cap(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        target_y: float | None,
+        total_force: np.ndarray,
+        scaled_target_speed: float,
+    ) -> float:
+        """Cap nominal braking in the near-stop hazard regime so saturated steering can keep making progress."""
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return scaled_target_speed
+        if state.speed > 0.35 or target_y is None:
+            return scaled_target_speed
+
+        lateral_error = abs(float(target_y - state.y))
+        if lateral_error <= 0.90 * self.config.vehicle_width:
+            return scaled_target_speed
+
+        clipped_force_x = float(np.clip(total_force[0], -8.0, 8.0))
+        if clipped_force_x > -6.0:
+            return scaled_target_speed
+
+        desired_min_accel = -0.03
+        speed_floor = state.speed + (desired_min_accel - 0.08 * clipped_force_x) / max(
+            self.config.speed_gain,
+            1e-6,
+        )
+        return float(max(scaled_target_speed, speed_floor))
+
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """输出风险自适应 APF-LF 名义控制。"""
 
@@ -442,13 +463,21 @@ class AdaptiveAPFController(APFLFController):
                 + behavior_force
                 + leader_guidance_force
             )
-            cached_forces.append(total_force)
-            cached_speeds.append(
-                self._mode_adjusted_target_speed(
-                    self._reference_speed(observation, index, mode),
-                    mode,
-                )
+            target_speed = self._mode_adjusted_target_speed(
+                self._reference_speed(observation, index, mode),
+                mode,
             )
+            if index == 0:
+                target_speed = self._leader_low_speed_braking_cap(
+                    observation=observation,
+                    state=state,
+                    mode=mode,
+                    target_y=float(target[1]),
+                    total_force=total_force,
+                    scaled_target_speed=target_speed,
+                )
+            cached_forces.append(total_force)
+            cached_speeds.append(target_speed)
             if index == 0:
                 leader_force_norm = float(np.linalg.norm(total_force))
 
