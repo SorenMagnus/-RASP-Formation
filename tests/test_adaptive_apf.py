@@ -232,6 +232,58 @@ def test_adaptive_apf_keeps_full_leader_reference_speed_before_local_flip() -> N
     assert reference_speed == pytest.approx(controller.target_speed)
 
 
+def test_adaptive_apf_preflip_target_y_starts_shifting_before_hard_local_flip() -> None:
+    """Just before the hard local flip, the leader target_y should already start drifting toward the alternate corridor."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=55,
+        time=5.5,
+        leader_state=State(x=24.813, y=-0.623, yaw=-0.22, speed=1.70),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    front_obstacles = controller._leader_front_obstacles(observation, observation.states[0])
+    nominal_side_sign = controller._mode_behavior_side_sign(mode)
+    assert nominal_side_sign == -1.0
+    assert (
+        controller._leader_behavior_side_sign(
+            observation,
+            observation.states[0],
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        == nominal_side_sign
+    )
+
+    nominal_target_y = controller._leader_side_target_y(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+        front_obstacles=front_obstacles,
+        side_sign=nominal_side_sign,
+    )
+    alternate_target_y = controller._leader_side_target_y(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+        front_obstacles=front_obstacles,
+        side_sign=-nominal_side_sign,
+        apply_flip_overshoot=False,
+    )
+    target_y = controller._leader_behavior_target_y(
+        observation,
+        observation.states[0],
+        mode,
+    )
+
+    assert nominal_target_y is not None
+    assert alternate_target_y is not None
+    assert target_y is not None
+    assert target_y > nominal_target_y + 0.20
+    assert target_y < alternate_target_y
+
+
 def test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_reorientation() -> None:
     """Once the staggered blocker forces a large lateral reorientation, the leader should stop commanding cruise speed."""
 

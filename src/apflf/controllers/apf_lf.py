@@ -337,21 +337,17 @@ class APFLFController(LeaderFollowerMixin, APFController):
         )
         return float(min(observation.goal_x, local_waypoint_x))
 
-    def _leader_behavior_target_y(
+    def _leader_side_target_y(
         self,
+        *,
         observation: Observation,
         state: State,
         mode: str | None,
+        front_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+        apply_flip_overshoot: bool = True,
     ) -> float | None:
-        front_obstacles = self._leader_front_obstacles(observation, state)
-        side_sign = self._leader_behavior_side_sign(
-            observation,
-            state,
-            mode,
-            front_obstacles=front_obstacles,
-        )
-        if side_sign is None:
-            return None
+        """Return the leader target_y associated with an explicitly chosen passing side."""
 
         center_y = observation.road.lane_center_y
         relevant_obstacles = self._leader_relevant_obstacles(
@@ -372,13 +368,14 @@ class APFLFController(LeaderFollowerMixin, APFController):
             else:
                 edge_target_y = min(edge_target_y, candidate_y)
 
-        edge_target_y += self._leader_flip_overshoot(
-            observation=observation,
-            state=state,
-            mode=mode,
-            side_sign=side_sign,
-            relevant_obstacles=relevant_obstacles,
-        )
+        if apply_flip_overshoot:
+            edge_target_y += self._leader_flip_overshoot(
+                observation=observation,
+                state=state,
+                mode=mode,
+                side_sign=side_sign,
+                relevant_obstacles=relevant_obstacles,
+            )
         channel_center_y = self._leader_side_channel_center_y(
             observation,
             relevant_obstacles=relevant_obstacles,
@@ -395,6 +392,123 @@ class APFLFController(LeaderFollowerMixin, APFController):
         target_y = (1.0 - centerline_blend) * edge_target_y + centerline_blend * channel_center_y
         max_center_offset = max(observation.road.half_width - 0.55 * self.config.vehicle_width, 0.0)
         return float(np.clip(target_y, center_y - max_center_offset, center_y + max_center_offset))
+
+    def _leader_preflip_target_blend(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        front_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+        target_y: float,
+    ) -> float:
+        """Start rotating the leader target toward the alternate corridor before the hard local flip."""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or nominal_side_sign != side_sign:
+            return target_y
+
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        alternate_side_sign = -side_sign
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=alternate_side_sign,
+        )
+        if not nominal_relevant or not alternate_relevant:
+            return target_y
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nominal_anchor = min(
+            nominal_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - state_front_x, 0.0),
+        )
+        alternate_anchor = min(
+            alternate_relevant,
+            key=lambda obstacle: max(obstacle.x - 0.5 * obstacle.length - state_front_x, 0.0),
+        )
+        nominal_rear_gap = nominal_anchor.x - 0.5 * nominal_anchor.length - state_front_x
+        alternate_rear_gap = alternate_anchor.x - 0.5 * alternate_anchor.length - state_front_x
+        preflip_gap = max(0.45 * self.config.vehicle_length, 1.25)
+        alternate_lookahead = max(0.5 * self.config.obstacle_influence_distance, 1.5 * self.config.vehicle_length)
+        if nominal_rear_gap > preflip_gap or not (0.0 <= alternate_rear_gap <= alternate_lookahead):
+            return target_y
+
+        center_y = observation.road.lane_center_y
+        nominal_offset = nominal_side_sign * (state.y - center_y)
+        commitment_threshold = max(0.34 * self.config.vehicle_width, 0.18 * observation.road.half_width)
+        preflip_start = 0.72 * commitment_threshold
+        if nominal_offset <= preflip_start:
+            return target_y
+
+        commitment_activation = float(
+            np.clip(
+                (nominal_offset - preflip_start) / max(commitment_threshold - preflip_start, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        gap_activation = float(
+            np.clip(
+                (preflip_gap - nominal_rear_gap) / max(preflip_gap, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        blend = min(commitment_activation * gap_activation, 0.55)
+        if blend <= 0.0:
+            return target_y
+
+        alternate_target_y = self._leader_side_target_y(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            side_sign=alternate_side_sign,
+            apply_flip_overshoot=False,
+        )
+        if alternate_target_y is None or alternate_target_y <= target_y:
+            return target_y
+        return float((1.0 - blend) * target_y + blend * alternate_target_y)
+
+    def _leader_behavior_target_y(
+        self,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+    ) -> float | None:
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        side_sign = self._leader_behavior_side_sign(
+            observation,
+            state,
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return None
+
+        target_y = self._leader_side_target_y(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        if target_y is None:
+            return None
+        return self._leader_preflip_target_blend(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+            target_y=target_y,
+        )
 
     def _leader_bypass_force(
         self,
