@@ -7,7 +7,7 @@
 - 主架构必须始终保持三层闭环，禁止退化成单层启发式或黑盒端到端：
   - `Nominal Controller`
   - `Safety Filter (CBF-QP + OSQP)`
-  - `Mode Decision (FSM 为主，RL 只允许作为可选离散决策扩展)`
+  - `Mode Decision (FSM 为主，RL 仅可作为离散决策可选增强)`
 
 ### 1.2 技术栈红线
 - 仅允许 Python 技术栈，当前仓库基线：
@@ -18,238 +18,303 @@
   - `matplotlib`
   - `osqp`
   - `pytest`
-- 禁止引入：
+- 禁止默认引入：
   - ROS
   - CUDA 依赖
-  - 用端到端黑盒控制器替换现有三层结构
+  - 端到端黑盒连续控制器
 
 ### 1.3 安全层红线
-- `Safety Filter` 必须保持：
+- `Safety Filter` 必须保留：
   - `CBF-QP`
   - `OSQP`
   - `preview verification`
-  - `fallback` 机制
-- 禁止通过删除 `preview verification`、删除 `fallback`、或直接放松 exact one-step safety 约束去“刷过” `s4/s5`。
-- 当前主矛盾仍然在 nominal 层几何，不在 safety 层。
+  - `fallback`
+- 禁止通过删除 `preview verification`、削弱 `fallback`、放松 one-step safety 约束来“刷过”场景。
+- 当前主要矛盾仍在 nominal 几何与速度调制，不在 safety 层。
+- 除非用户明确要求，禁止直接改 `src/apflf/safety/safety_filter.py` 去换结果。
 
-### 1.4 实验与复现红线
-- 必须保持 headless CLI、YAML 配置驱动、全链路 seed 可复现。
-- 每个实验输出至少包含：
+### 1.4 工程与复现红线
+- 必须保持：
+  - headless CLI
+  - YAML 配置驱动
+  - 全链路 seed 可复现
+  - 结果导出可重算
+- 每次有效代码改动后至少验证：
+  - `python -m pytest -q`
+  - `python -m compileall src tests scripts`
+- 实验输出至少应包含：
   - `config_resolved.yaml`
   - `summary.csv`
   - `traj/*.npz`
-- 每次代码修改后至少通过：
-  - `python -m compileall src tests scripts`
-  - `python -m pytest -q`
 
 ## 2. 当前开发游标
 
-### 2.1 当前 HEAD 与工作树
+### 2.1 仓库与工作树状态
 - 当前 `HEAD`：
-  - `761648956209e43332c6c8e5ca2d0ce346bf325e`
-  - 提交说明：`第十次更新`
-  - 提交时间：`2026-03-23 21:50:17 +0800`
-- 当前工作树不是干净的，存在 2 个未提交改动：
-  - `src/apflf/controllers/apf_lf.py`
-  - `tests/test_adaptive_apf.py`
-- 这两个未提交改动正是本轮新增的 pre-flip 几何优化与其回归测试。
-- 注意：
-  - `outputs/context_sync_s5_preflip_blend_v1/summary.csv` 记录的 `git_commit` 仍是当前 `HEAD`
-  - 但该结果实际来自“基于 `HEAD`、且带上述本地未提交修改”的脏工作树
-  - 下一位工程师如需严格复现，必须保留这两处改动再重跑
+  - commit: `789fa3c9f79d8a447661c338ad90d9ab1a03d6bf`
+  - 时间: `2026-03-23 23:30:54 +08:00`
+  - 提交说明: `第十一次更新`
+- 当前工作树相对 `HEAD` 仅有一个修改文件：
+  - `AI_MEMORY.md`
+- 也就是说：
+  - 所有 `src/` 与 `tests/` 代码当前都已经回到 clean-HEAD 行为
+  - 本轮 boundary gate 试探已经完整回退，没有遗留未提交代码
 
-### 2.2 当前已验证状态
-- 本轮定向验证：
-  - `python -m pytest tests/test_adaptive_apf.py -q` -> `26 passed in 0.90s`
-- 本轮完整验证：
-  - `python -m pytest -q` -> `86 passed in 208.16s`
+### 2.2 当前代码主线
+- 当前 nominal 主线已经包含并保留：
+  - `src/apflf/controllers/apf_lf.py`
+    - `_leader_side_target_y(...)`
+    - `_leader_hazard_target_x(...)`
+    - `_leader_preflip_target_blend(...)`
+  - 其中 `preflip_blend` 当前稳定版本仍是：
+    - `blend = commitment_activation * gap_activation`
+    - 上界 `0.55`
+- 当前 adaptive nominal 还包含：
+  - `src/apflf/controllers/adaptive_apf.py`
+    - `_leader_hazard_speed_limit(...)`
+    - `_leader_low_speed_braking_cap(...)`
+- 当前安全层主线：
+  - `src/apflf/safety/safety_filter.py`
+- 当前模式决策主线：
+  - `src/apflf/decision/fsm_mode.py`
+  - `rl_mode.py` / `game_heuristic.py` 仍是可选扩展，不是当前 blocker
+
+### 2.3 当前验证状态
+- 最近一次完整验证：
+  - `python -m pytest -q` -> `86 passed in 184.27s`
   - `python -m compileall src tests scripts` -> 通过
 
-### 2.3 当前最可信的场景级结果
-- 当前最可信的 `S5` 单 seed 结果在：
-  - `outputs/context_sync_s5_preflip_blend_v1/summary.csv`
-- 关键指标：
-  - `leader_final_x = 26.674232747808983`
-  - `fallback_events = 205`
-  - `safety_interventions = 238`
-  - `collision_count = 0`
-  - `boundary_violation_count = 0`
-  - `min_ttc = 0.6468118018741192`
-  - `min_boundary_margin = 0.03984901892907544`
-  - `min_obstacle_clearance = 0.500995095301306`
-
-### 2.4 相对上一稳定基线的变化
-- 上一版最可信基线在：
-  - `outputs/context_sync_s5_braking_cap_v1/summary.csv`
-- 本轮 pre-flip 几何改动相对上一版的净变化：
-  - `leader_final_x`：`26.64380778642643 -> 26.674232747808983`
-  - `fallback_events`：`205 -> 205`
-  - `safety_interventions`：`239 -> 238`
-  - `collision_count`：保持 `0`
-  - `boundary_violation_count`：保持 `0`
-- 结论：
-  - 这是一次真实的净正推进
-  - `S5` leader 终于明显往前走了一截
-  - 但 `min_ttc` 与 `min_boundary_margin` 比上一版略紧，说明 pre-flip 机制下一步要补“边界裕度感知”
-
-### 2.5 当前核心诊断
-- 本轮之前的关键诊断已经被验证：
-  - `step 70-80` 不是根因，晚段 `target_y` 已经足够正确
-  - 真正应该动刀的位置是 `step 53-56`
-  - 问题是 hard local flip 之前缺少平滑预偏转
-- 本轮落地后，结论进一步收敛为：
-  - `pre-flip target geometry` 是正确方向
-  - 继续做 late-stage braking cap / crawl floor 不是主线
-  - 下一刀不再是“要不要做 pre-flip”，而是“怎么让 pre-flip 更边界感知、更稳”
+### 2.4 当前最可信参考输出
+- 当前 stable nominal 逻辑的实验参考主要看两类输出：
+  - 主仓库已有历史单点结果：
+    - `outputs/context_sync_s5_preflip_blend_v1/summary.csv`
+  - 本轮为 clean-HEAD 对照额外生成的临时工作树结果：
+    - `D:\11111\-RASP-Formation__baseline_head\outputs\context_sync_boundary_gate_baseline__s1_local_minima`
+    - `D:\11111\-RASP-Formation__baseline_head\outputs\context_sync_boundary_gate_baseline__s2_dynamic_crossing`
+    - `D:\11111\-RASP-Formation__baseline_head\outputs\context_sync_boundary_gate_baseline__s5_dense_multi_agent`
+- 说明：
+  - 主仓库里 `context_sync_boundary_gate_smoke__*` 是 boundary-gate 试探阶段产物，只能用于诊断，不应再当作主线结果
+  - 当前代码已经回退，所以若要复现实验，应以 clean-HEAD 逻辑重新跑主仓库输出，或参考上面的 baseline worktree 结果
 
 ## 3. 已完成工作
 
-### 3.1 已在当前基线中保留的既有 nominal 机制
-- `src/apflf/controllers/apf_lf.py`
-  - `_leader_nonrelevant_clearance_activation()`
-    - 对 nonrelevant obstacle 的局部清障状态提供平滑 activation
-  - `_leader_side_channel_center_y()`
-    - 计算当前绕行侧通道中心线
-  - `_leader_channel_centerline_blend()`
-    - 将 `target_y` 从障碍边缘目标平滑 blend 向通道中心线
-  - `_leader_hazard_target_x()`
-    - hazard 阶段引入 near-preview，避免 leader 永远盯远端 `goal_x`
-  - `_leader_bypass_force()`
-    - 对 road push 做 leader-specific 的横向补偿
-- `src/apflf/controllers/adaptive_apf.py`
-  - nonrelevant obstacle 横向削弱已经统一复用 clearance activation
-  - `_leader_low_speed_braking_cap()` 已保留
-    - 只在 low-speed hazard near-stop 窗口中避免 nominal 自己把车刹死
+### 3.1 架构级工作
+- 三层主架构已经打通：
+  - nominal controller
+  - safety filter
+  - mode decision
+- 可复现实验闭环已经具备：
+  - `scripts/run_experiment.py`
+  - `scripts/reproduce_paper.py`
+  - `src/apflf/sim/runner.py`
+  - `src/apflf/sim/replay.py`
+- 分析与论文导出链路已经具备基础版本：
+  - `src/apflf/analysis/metrics.py`
+  - `src/apflf/analysis/stats.py`
+  - `src/apflf/analysis/export.py`
 
-### 3.2 本轮新完成的核心代码工作
-- 文件：
-  - `src/apflf/controllers/apf_lf.py`
-- 已新增 `_leader_side_target_y(...)`
-  - 将“在指定绕行侧上计算 leader `target_y`”抽成独立 helper
-  - 支持显式 `side_sign`
-  - 支持 `apply_flip_overshoot=False`
-  - 这一步是后续所有 pre-flip 几何修正的接口基础
-- 已新增 `_leader_preflip_target_blend(...)`
-  - 在 hard local flip 之前，提前把 `target_y` 从 nominal-side target 平滑拉向 alternate-side corridor target
-  - 触发条件依赖：
-    - nominal-side lateral commitment 已接近现有 flip threshold
-    - nominal anchor rear gap 已接近 flip 区间
-    - alternate relevant obstacle 已进入 lookahead window
-  - 当前 blend 系数上界是 `0.55`
-  - 该机制是：
-    - `leader-only`
-    - `hazard-only`
-    - 平滑有界
-    - 不引入新的 hard switch
-- 已重构 `_leader_behavior_target_y()`
-  - 改为：
-    - 先调用 `_leader_side_target_y(...)`
-    - 再调用 `_leader_preflip_target_blend(...)`
-  - 这样当前的 pre-flip 逻辑与 post-flip 逻辑已经被正式串进主 nominal 链路
+### 3.2 nominal 控制层已完成的关键工作
+- `APF-LF` 与 `Adaptive APF` 已完成主线融合。
+- leader hazard 几何已经不再只是“贴边走”：
+  - 已显式区分 passing side
+  - 已引入 corridor centerline blend
+  - 已引入 flip overshoot
+  - 已引入 hazard-local target_x
+  - 已引入 pre-flip target_y 提前偏转
+- 当前最重要的 nominal 收获不是新模块，而是：
+  - pre-flip 几何修正已经正式进入主线
+  - leader 在 hard local flip 之前就能开始向 alternate corridor 漂移
 
-### 3.3 本轮新完成的测试工作
-- 文件：
-  - `tests/test_adaptive_apf.py`
-- 已新增回归：
+### 3.3 safety 与 decision 已完成工作
+- `CBF-QP + preview verification + fallback` 已工作，并有对应测试。
+- `FSM + hysteresis + recover` 已工作。
+- 当前主版本依赖 FSM，不依赖 RL。
+
+### 3.4 测试与工程质量
+- 当前完整测试通过数为 `86`。
+- `tests/test_adaptive_apf.py` 已包含与当前 nominal 主线一致的关键回归：
+  - `test_adaptive_apf_keeps_full_leader_reference_speed_before_local_flip`
   - `test_adaptive_apf_preflip_target_y_starts_shifting_before_hard_local_flip`
-- 该测试锁定的行为是：
-  - 在 `step 55` 左右、仍处于 `yield_right` 且 hard flip 尚未发生时
-  - leader 的 `target_y` 必须已经开始从 nominal-side target 漂向 alternate corridor
-  - 不能等到 hard local flip 真的发生之后才突然抬升
+  - `test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_reorientation`
+  - `test_adaptive_apf_caps_low_speed_hazard_braking_before_self_stop`
 
-### 3.4 本轮已完成的实验结论
-- `S5` 单 seed pre-flip 探针已经跑通：
-  - 输出目录：`outputs/context_sync_s5_preflip_blend_v1`
-- 当前新版本相对上一版是净正：
-  - `leader_final_x` 明显提升
-  - `fallback_events` 没有增加
-  - `safety_interventions` 反而小降
-  - 安全指标保持零碰撞、零边界越界
-- 这意味着：
-  - “把 pre-flip 提前到 target geometry 层”是正确的
-  - 当前改动值得保留
+### 3.5 本轮额外完成的实验工作
+- 已完成 `S1/S2/S5 × seeds 0 1 2` 小范围 sweep。
+- 已完成 clean-HEAD 基线对照：
+  - 在临时工作树 `D:\11111\-RASP-Formation__baseline_head` 中运行同样的 `S1/S2/S5 × seeds 0 1 2`
+- 已完成 boundary-aware preflip gate 的完整验证与回退：
+  - 试探版代码曾加入 `boundary-aware preflip gating`
+  - 小范围对照后确认其不具备稳健收益
+  - 已从主线完全回退
 
-## 4. 下一步指令
+## 4. 当前最可信实验事实
 
-### 4.1 下一个工程师启动 AI 后，应立即写哪段代码
+### 4.1 S1 local minima
+- `S1` 当前代码与 clean-HEAD 对照完全一致，说明这组结果不是 boundary gate 引入的。
+- seed 级摘要：
+  - seed0:
+    - `leader_final_x = 111.31568626878654`
+    - `reached_goal = True`
+    - `team_goal_reached = True`
+    - `boundary_violation_count = 0`
+  - seed1:
+    - `leader_final_x = 126.91361401785045`
+    - `reached_goal = True`
+    - `team_goal_reached = False`
+    - `boundary_violation_count = 1`
+  - seed2:
+    - `leader_final_x = 118.11507950033955`
+    - `reached_goal = True`
+    - `team_goal_reached = False`
+    - `boundary_violation_count = 0`
+- 结论：
+  - `S1` 仍有 preexisting 难点，尤其是 seed1 的边界与编队恢复质量
+  - 但这不是本轮 boundary gate 的副作用
+
+### 4.2 S2 dynamic crossing
+- `S2` 当前代码与 clean-HEAD 对照完全一致。
+- 三个 seed 全部满足：
+  - `collision_count = 0`
+  - `boundary_violation_count = 0`
+  - `reached_goal = True`
+  - `team_goal_reached = True`
+- 结论：
+  - `S2` 当前主线已相对稳定，不是当前 blocker
+
+### 4.3 S5 dense multi-agent
+- `S5` 是当前论文主结果最关键也最未完成的难场景。
+- 对应当前 stable 代码逻辑，可信参考应看 clean-HEAD baseline worktree 输出：
+  - seed0:
+    - `leader_final_x = 26.674232747808983`
+    - `fallback_events = 205`
+    - `safety_interventions = 238`
+    - `collision_count = 0`
+    - `boundary_violation_count = 0`
+    - `reached_goal = False`
+  - seed1:
+    - `leader_final_x = 26.708307520909788`
+    - `fallback_events = 66`
+    - `safety_interventions = 85`
+    - `collision_count = 0`
+    - `boundary_violation_count = 0`
+    - `reached_goal = False`
+  - seed2:
+    - `leader_final_x = 26.72258686357844`
+    - `fallback_events = 71`
+    - `safety_interventions = 92`
+    - `collision_count = 0`
+    - `boundary_violation_count = 0`
+    - `reached_goal = False`
+- 结论：
+  - 当前主线在 `S5` 上已经守住了安全红线
+  - 但仍未形成“到达目标”的论文级闭环
+  - 真正的问题已从“是否会撞/越界”转为“如何减少 fallback 与 safety 托底，同时让 leader 更有效穿过 staggered multi-blocker corridor”
+
+### 4.4 boundary-aware preflip gate 的最终结论
+- 该方向已经被完整验证，不应再继续盲调。
+- 诊断结论：
+  - `S1/S2` 与 clean-HEAD 完全一致
+  - `S5` 真正受影响
+  - `S5 seed1/2` 中，boundary gate 让 leader 在后段更容易出现 nominal accel 过激，随后被 safety 托底
+- 因而最终工程决策是：
+  - 回退 boundary gate
+  - 保留 preflip blend 主线
+  - 下一步改方向，不再围绕 boundary gate 做 guard/release band 微调
+
+## 5. 下一步指令
+
+### 5.1 下一个工程师启动 AI 后，应该立刻写的代码
 - 第一优先文件：
-  - `src/apflf/controllers/apf_lf.py`
-- 立即要写的内容：
-  - 在现有 `_leader_preflip_target_blend(...)` 上加入 **boundary-aware preflip gating**
-  - 让 pre-flip blend 不仅看 commitment 与 gap，还要看“alternate corridor 会不会把 leader 过早推到边界附近”
+  - `src/apflf/controllers/adaptive_apf.py`
+- 第一优先切入点：
+  - 在现有 `_leader_hazard_speed_limit(...)` 上继续做 nominal 纵向调制增强
+- 建议新增 helper：
+  - `_leader_staggered_hazard_activation(...)`
+  - 或 `_leader_dual_blocker_speed_scale(...)`
 
-- 第二优先文件：
-  - `tests/test_adaptive_apf.py`
-- 立即要补的测试：
-  - 新增一个回归测试，锁住“当 alternate-side corridor 的边界剩余裕度不足时，pre-flip blend 必须被抑制或显著削弱”
+### 5.2 要解决的真实问题
+- 当前 `S5` 的主要矛盾不是 lateral target 不会提前翻，而是：
+  - leader 在 staggered multi-blocker bypass 几何里，纵向 aggressiveness 仍然偏高
+  - 最终表现为 fallback 与 safety interventions 偏多
+  - 结果是虽然安全，但长期 `reached_goal = False`
 
-### 4.2 下一段代码必须满足的具体数学约束
-- 这仍然是 nominal geometry 修正，不是 safety 修正。
-- 必须继续满足：
+### 5.3 必须满足的具体数学约束
+- 这次修改必须仍然是 nominal 层，不是 safety 层。
+- 必须满足以下约束：
   - `leader-only`
   - `hazard-only`
   - 平滑有界
-  - 不能引入新的二元硬切换
-  - 不能直接修改 `safety_filter.py`
-  - 不能通过硬改 `force_x` 猛踩油门
+  - 不引入新的硬切换
+  - 不修改 `src/apflf/safety/safety_filter.py`
+  - 不通过硬改 `force_x` 或直接钳死 accel 来“刷指标”
+- 建议的几何量必须同时使用三类信息：
+  - nominal-side blocker 的 rear gap
+  - alternate-side blocker 的 rear gap
+  - 当前 lateral reorientation 未完成程度
+- 一个推荐的数学形式是构造三个 `activation ∈ [0, 1]`：
+  - `a_nominal_gap`
+    - nominal blocker 越接近，值越大
+  - `a_alternate_gap`
+    - alternate blocker 越进入 lookahead window，值越大
+  - `a_lateral`
+    - `|target_y - state.y|` 越大，值越大
+- 然后构造一个平滑有界的综合量：
+  - `a_staggered = a_nominal_gap * a_alternate_gap * a_lateral`
+- 最终只允许用它去压低 leader hazard reference speed，而不是改 safety：
+  - `speed_cap = f(base_target_speed, gap_speed, a_staggered)`
+  - 必须满足：
+    - 当 `a_staggered = 0` 时，输出必须退化为当前已有逻辑
+    - 当 `a_staggered` 增大时，`speed_cap` 单调不增
+    - `speed_cap` 必须保留下界，不能把 leader 直接钉死
+    - 不能影响 follower reference speed
 
-- 推荐加入的新约束项：
-  - 在 `_leader_preflip_target_blend(...)` 中引入第三个 activation：
-    - `boundary_activation`
-  - 该量应由 alternate-side target 或 alternate corridor 对应的边界剩余裕度构造
-  - 建议使用平滑有界形式，而不是硬阈值开关
+### 5.4 下一个工程师必须补的测试
+- 文件：
+  - `tests/test_adaptive_apf.py`
+- 至少补两个回归：
+  - 一个 `S5` 风格测试，锁住“当 nominal/alternate 双 blocker 同时进入竞争几何，且 lateral reorientation 尚未完成时，leader reference_speed 必须进一步下降”
+  - 一个非目标场景保护测试，锁住“在非 staggered case 或 preflip 很早阶段，不能平白压低巡航速度”
+- 现有测试必须继续通过：
+  - `test_adaptive_apf_keeps_full_leader_reference_speed_before_local_flip`
+  - `test_adaptive_apf_preflip_target_y_starts_shifting_before_hard_local_flip`
+  - `test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_reorientation`
+  - `test_adaptive_apf_caps_low_speed_hazard_braking_before_self_stop`
 
-- 一个可接受的实现方向：
-  - 先计算 `alternate_target_y`
-  - 再计算该目标对应的道路边界剩余裕度：
-    - `boundary_margin_alt = road_half_width - abs(alternate_target_y - lane_center_y) - 0.5 * vehicle_width`
-  - 构造一个平滑 activation：
-    - 当 `boundary_margin_alt` 小于安全 guard band 时，`boundary_activation -> 0`
-    - 当 `boundary_margin_alt` 足够宽松时，`boundary_activation -> 1`
-  - 最终 blend 系数改为：
-    - `blend = commitment_activation * gap_activation * boundary_activation`
-    - 仍然保留上界，不超过当前量级 `0.55`
-
-- 必须保持的行为约束：
-  - 在 `step 53-56` 的 S5 几何里，pre-flip 仍要比当前 nominal-side target 更早向 alternate corridor 偏移
-  - 但不允许为了换取更大的 `leader_final_x` 而继续明显压缩 `min_boundary_margin`
-  - 目标是“保住当前推进，同时把边界裕度拉回一点”
-
-### 4.3 下一轮验收标准
-- 先跑 `S5` 单 seed 探针
-- 新版本至少应满足：
-  - `leader_final_x >= 26.674232747808983`
-  - `collision_count = 0`
-  - `boundary_violation_count = 0`
-  - `fallback_events <= 205`
-  - `safety_interventions <= 238`
-  - `min_boundary_margin` 不低于当前值，最好比 `0.03984901892907544` 更宽松
-
-- 然后再做一个小范围鲁棒性检查：
-  - 推荐先跑 `S1/S2/S5`
-  - 每个场景至少 `seeds = 0 1 2`
-  - 先看 pre-flip 机制有没有把别的场景带坏，再决定是否扩到完整论文矩阵
-
-- 验证命令：
+### 5.5 下一轮验收标准
+- 代码验收：
   - `python -m pytest -q`
   - `python -m compileall src tests scripts`
-  - `python scripts/run_experiment.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 --exp-id <new_exp_id>`
+- 实验验收：
+  - 先跑：
+    - `python scripts/run_experiment.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --exp-id <new_exp_id>`
+  - 然后至少补跑：
+    - `S1/S2/S5 × seeds 0 1 2`
+- 下一轮最低 no-regression 目标：
+  - seed0:
+    - `leader_final_x >= 26.674232747808983`
+    - `fallback_events <= 205`
+    - `safety_interventions <= 238`
+  - seed1:
+    - `leader_final_x >= 26.708307520909788`
+    - `fallback_events <= 66`
+    - `safety_interventions <= 85`
+  - seed2:
+    - `leader_final_x >= 26.72258686357844`
+    - `fallback_events <= 71`
+    - `safety_interventions <= 92`
+  - 所有 seed 都必须保持：
+    - `collision_count = 0`
+    - `boundary_violation_count = 0`
 
-### 4.4 明确不要做的事
+## 6. 明确不要做的事
+- 不要再继续调这版 `boundary-aware preflip gating`
 - 不要碰 `src/apflf/safety/safety_filter.py`
-- 不要把主精力重新拉回 late-stage braking cap / crawl floor
-- 不要再次简单地只调 relock threshold
-- 不要直接硬改 `force_x` 去“推着车冲过去”
+- 不要把主精力拉回 late-stage braking cap / crawl floor 的重复微调
+- 不要直接硬改 `force_x`、硬钳 accel、或靠 mode 名字硬分支“刷过” `S5`
+- 不要把 RL 拉成主版本
 
-## 5. 交接备注
-
-- 当前仓库的最好理解方式是：
-  - 既有 nominal 主线已经从“只会 late-stage 微修”推进到了“会在 hard flip 前做几何预偏转”
-  - 这一步是本轮最重要的真正进展
-
+## 7. 交接备注
 - 当前最重要的新事实不是“又多了一个 patch”，而是：
-  - `pre-flip target geometry` 已经落地
-  - 它在 `S5` 上已经拿到了真实净提升
-  - 下一步应该从“是否做 pre-flip”切换到“如何让 pre-flip 更边界感知、更鲁棒”
-
-- 如果下一位工程师严格沿着“boundary-aware preflip gating + 对应回归测试 + 小规模多 seed 验证”这条线继续走，最有希望在不破坏安全红线的前提下，把当前 `S5` 的改善变成稳定、可扩展、可写进论文主结果的提升。
+  - boundary gate 这条线已经被完整试错并排除
+  - 当前主线应重新聚焦到 staggered multi-blocker 几何下的 nominal 纵向调制
+- 如果下一位工程师严格沿着“`adaptive_apf.py` 中 leader hazard speed governor 的几何增强 + 对应回归测试 + `S1/S2/S5 × seeds 0 1 2` 小范围验证”这条线继续走，是当前最有希望把 `S5` 从“安全但到不了”推进到论文主结果可用状态的路径。
