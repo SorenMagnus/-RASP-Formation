@@ -577,3 +577,77 @@ def test_nonrelevant_shaping_bounded_total_reduction() -> None:
     # force_y magnitude strictly less than raw (shaping did activate)
     if abs(float(raw_force[1])) > 1e-9:
         assert abs(float(shaped_force[1])) < abs(float(raw_force[1]))
+
+
+def test_adaptive_apf_staggered_dual_blocker_further_throttles_leader_speed() -> None:
+    """When both nominal-side and alternate-side blockers compete in the staggered corridor
+    and lateral reorientation is incomplete, the staggered governor must further reduce speed
+    below the single-blocker hazard limit."""
+
+    controller = _make_controller()
+    # Leader deep inside the staggered zone with significant lateral offset
+    observation = _make_stage5_observation(
+        step_index=58,
+        time=5.8,
+        leader_state=State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+
+    # Get single-stage hazard limit (without staggered governor)
+    hazard_only_speed = controller._leader_hazard_speed_limit(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+        base_target_speed=controller.target_speed,
+    )
+    # Get full reference speed (hazard limit + staggered governor)
+    full_reference_speed = controller._reference_speed(observation, index=0, mode=mode)
+
+    # Staggered governor must further reduce below the hazard-only limit
+    assert full_reference_speed < hazard_only_speed, (
+        f"staggered governor should reduce speed: {full_reference_speed} < {hazard_only_speed}"
+    )
+    # Must maintain a positive crawl floor
+    assert full_reference_speed >= 0.40
+
+
+def test_adaptive_apf_staggered_governor_inactive_without_dual_blockers() -> None:
+    """When only one side has obstacles (no staggered geometry), the staggered governor
+    must not reduce the cruise speed — protecting non-staggered scenarios."""
+
+    controller = _make_controller()
+    # Leader approaching a SINGLE blocker (no alternate-side obstacle)
+    single_blocker_observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.46, y=-1.05, yaw=0.08, speed=2.0),
+            State(x=7.56, y=-0.84, yaw=0.01, speed=1.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            # Only one blocker — no staggered geometry
+            ObstacleState("single_blocker", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    # Get hazard-limited speed
+    hazard_only = controller._leader_hazard_speed_limit(
+        observation=single_blocker_observation,
+        state=single_blocker_observation.states[0],
+        mode=mode,
+        base_target_speed=controller.target_speed,
+    )
+    # Get full reference speed
+    full_speed = controller._reference_speed(
+        single_blocker_observation, index=0, mode=mode,
+    )
+
+    # Staggered governor must NOT reduce speed when only one blocker exists
+    assert full_speed == pytest.approx(hazard_only, abs=1e-9), (
+        f"staggered governor should be inactive: {full_speed} vs {hazard_only}"
+    )

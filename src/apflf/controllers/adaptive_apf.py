@@ -343,17 +343,147 @@ class AdaptiveAPFController(APFLFController):
             hazard_speed_cap = min(hazard_speed_cap, state.speed + 0.35)
         return float(min(base_target_speed, hazard_speed_cap))
 
+    def _leader_staggered_hazard_speed_cap(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        base_target_speed: float,
+    ) -> float:
+        """Further throttle leader speed when staggered dual-blocker geometry is detected.
+
+        Supplements ``_leader_hazard_speed_limit`` by detecting configurations
+        where both nominal-side and alternate-side blockers simultaneously
+        constrain the corridor.  Constructs three smooth activations:
+
+        * ``a_nominal_gap``  – proximity of the nearest nominal-side blocker
+        * ``a_alternate_gap`` – alternate-side blocker entering lookahead
+        * ``a_lateral``       – lateral reorientation incompleteness
+
+        Composite ``a_staggered = a_nominal_gap * a_alternate_gap * a_lateral``
+        drives a gap-speed blend that is monotonically non-increasing and
+        preserves a crawl-speed floor.  When ``a_staggered == 0`` the output
+        degrades exactly to ``base_target_speed`` (minimal-intervention).
+
+        Mathematical constraints (AI_MEMORY §5.3):
+        * leader-only, hazard-only, smooth-bounded
+        * does not modify ``safety_filter.py``
+        * does not affect follower reference speed
+        """
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return base_target_speed
+
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        if not front_obstacles:
+            return base_target_speed
+
+        side_sign = self._leader_behavior_side_sign(
+            observation, state, mode, front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return base_target_speed
+
+        # --- nominal-side relevant obstacles ---
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation, front_obstacles=front_obstacles, side_sign=side_sign,
+        )
+        if not nominal_relevant:
+            return base_target_speed
+
+        # --- alternate-side relevant obstacles (staggered detection) ---
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation, front_obstacles=front_obstacles, side_sign=-side_sign,
+        )
+        if not alternate_relevant:
+            return base_target_speed
+
+        # --- lateral dead-zone: skip if reorientation is nearly complete ---
+        target_y = self._leader_behavior_target_y(observation, state, mode)
+        if target_y is None:
+            return base_target_speed
+        lateral_error = abs(float(target_y - state.y))
+        lateral_dead_zone = 0.40 * self.config.vehicle_width
+        if lateral_error <= lateral_dead_zone:
+            return base_target_speed
+
+        # --- a_nominal_gap: how close is the nearest nominal blocker ---
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nominal_rear_gap = min(
+            obs.x - 0.5 * obs.length - state_front_x for obs in nominal_relevant
+        )
+        engage_distance = max(
+            0.25 * self.config.obstacle_influence_distance,
+            1.0 * self.config.vehicle_length,
+        )
+        a_nominal_gap = float(np.clip(
+            (engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6),
+            0.0, 1.0,
+        ))
+
+        # --- a_alternate_gap: alternate blocker within lookahead ---
+        alternate_rear_gap = min(
+            obs.x - 0.5 * obs.length - state_front_x for obs in alternate_relevant
+        )
+        alternate_lookahead = max(
+            0.5 * self.config.obstacle_influence_distance,
+            1.5 * self.config.vehicle_length,
+        )
+        if alternate_rear_gap < -0.5 * self.config.vehicle_length:
+            return base_target_speed
+        if alternate_rear_gap > alternate_lookahead:
+            return base_target_speed
+        a_alternate_gap = float(np.clip(
+            (alternate_lookahead - alternate_rear_gap) / max(alternate_lookahead, 1e-6),
+            0.0, 1.0,
+        ))
+
+        # --- a_lateral: lateral reorientation incompleteness ---
+        lateral_window = max(
+            1.5 * self.config.vehicle_width,
+            0.5 * observation.road.half_width,
+        )
+        a_lateral = float(np.clip(
+            (lateral_error - lateral_dead_zone) / max(lateral_window - lateral_dead_zone, 1e-6),
+            0.0, 1.0,
+        ))
+
+        # --- composite staggered activation ---
+        a_staggered = a_nominal_gap * a_alternate_gap * a_lateral
+        if a_staggered <= 1e-6:
+            return base_target_speed
+
+        # --- gap-speed blend: monotonically non-increasing, floor-bounded ---
+        min_gap = min(max(nominal_rear_gap, 0.0), max(alternate_rear_gap, 0.0))
+        max_brake = max(abs(self.bounds.accel_min), 1e-6)
+        staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
+        blend = float(np.clip(a_staggered * 4.5, 0.0, 0.65))
+        crawl_floor = 0.45
+        staggered_cap = max(
+            crawl_floor,
+            (1.0 - blend) * base_target_speed + blend * staggered_gap_speed,
+        )
+        return float(min(base_target_speed, staggered_cap))
+
     def _reference_speed(self, observation: Observation, index: int, mode: str) -> float:
-        """Construct reference speed with an extra leader hazard-speed governor for adaptive control."""
+        """Construct reference speed with leader hazard-speed governor and staggered corridor governor."""
 
         base_target_speed = super()._reference_speed(observation, index, mode)
         if index != 0:
             return base_target_speed
-        return self._leader_hazard_speed_limit(
+        hazard_limited = self._leader_hazard_speed_limit(
             observation=observation,
             state=observation.states[index],
             mode=mode,
             base_target_speed=base_target_speed,
+        )
+        return self._leader_staggered_hazard_speed_cap(
+            observation=observation,
+            state=observation.states[index],
+            mode=mode,
+            base_target_speed=hazard_limited,
         )
 
     def _leader_low_speed_braking_cap(
