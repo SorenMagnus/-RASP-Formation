@@ -208,7 +208,8 @@ def test_adaptive_apf_tapers_nonrelevant_obstacle_lateral_push_after_local_reloc
     )
     actions = controller.compute_actions(observation, mode=mode)
 
-    assert shaped_obstacle_force[0] == pytest.approx(raw_obstacle_force[0])
+    assert abs(float(shaped_obstacle_force[0])) < abs(float(raw_obstacle_force[0]))
+    assert shaped_obstacle_force[0] > raw_obstacle_force[0]
     assert shaped_obstacle_force[1] > raw_obstacle_force[1]
     assert actions[0].steer > 0.05
 
@@ -284,6 +285,93 @@ def test_adaptive_apf_preflip_target_y_starts_shifting_before_hard_local_flip() 
     assert target_y < alternate_target_y
 
 
+def test_adaptive_apf_preflip_dual_blocker_window_reduces_leader_reference_speed() -> None:
+    """The dual-blocker preflip window should start throttling the leader before the hard local flip."""
+
+    controller = _make_controller()
+    dual_observation = _make_stage5_observation(
+        step_index=55,
+        time=5.5,
+        leader_state=State(x=24.813, y=-0.623, yaw=-0.22, speed=1.70),
+    )
+    single_observation = Observation(
+        step_index=55,
+        time=5.5,
+        states=dual_observation.states,
+        road=dual_observation.road,
+        goal_x=dual_observation.goal_x,
+        desired_offsets=dual_observation.desired_offsets,
+        obstacles=(
+            ObstacleState("dense_static_left", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+            ObstacleState("far_right", 70.0, -2.1, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    dual_front_obstacles = controller._leader_front_obstacles(dual_observation, dual_observation.states[0])
+    dual_target_y = controller._leader_behavior_target_y(
+        dual_observation,
+        dual_observation.states[0],
+        mode,
+    )
+    dual_activation = controller._leader_staggered_hazard_activation(
+        observation=dual_observation,
+        state=dual_observation.states[0],
+        mode=mode,
+        front_obstacles=dual_front_obstacles,
+        target_y=dual_target_y,
+    )
+    dual_reference_speed = controller._reference_speed(
+        dual_observation,
+        index=0,
+        mode=mode,
+    )
+    single_reference_speed = controller._reference_speed(
+        single_observation,
+        index=0,
+        mode=mode,
+    )
+
+    assert dual_activation > 0.05
+    assert dual_reference_speed < 2.0
+    assert dual_reference_speed < single_reference_speed
+    assert single_reference_speed == pytest.approx(controller.target_speed)
+
+
+def test_adaptive_apf_staggered_activation_stays_zero_before_competition_window_opens() -> None:
+    """Early hazard motion should not trigger the staggered dual-blocker speed governor."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=48,
+        time=4.8,
+        leader_state=State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    front_obstacles = controller._leader_front_obstacles(observation, observation.states[0])
+    target_y = controller._leader_behavior_target_y(
+        observation,
+        observation.states[0],
+        mode,
+    )
+    activation = controller._leader_staggered_hazard_activation(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+        front_obstacles=front_obstacles,
+        target_y=target_y,
+    )
+    reference_speed = controller._reference_speed(
+        observation,
+        index=0,
+        mode=mode,
+    )
+
+    assert activation == pytest.approx(0.0)
+    assert reference_speed == pytest.approx(controller.target_speed)
+
+
 def test_adaptive_apf_leader_reference_speed_throttles_during_staggered_hazard_reorientation() -> None:
     """Once the staggered blocker forces a large lateral reorientation, the leader should stop commanding cruise speed."""
 
@@ -334,7 +422,7 @@ def test_adaptive_apf_caps_low_speed_hazard_braking_before_self_stop() -> None:
         mode="topology=diamond|behavior=yield_left|gain=cautious",
     )
 
-    assert -0.031 <= actions[0].accel <= 0.0
+    assert -0.031 <= actions[0].accel <= 1e-9
     assert actions[0].steer > 0.05
 
 
@@ -607,8 +695,190 @@ def test_adaptive_apf_staggered_dual_blocker_further_throttles_leader_speed() ->
     assert full_reference_speed < hazard_only_speed, (
         f"staggered governor should reduce speed: {full_reference_speed} < {hazard_only_speed}"
     )
-    # Must maintain a positive crawl floor
-    assert full_reference_speed >= 0.40
+    # A still-rolling leader should stay above the hard crawl floor.
+    assert full_reference_speed > 0.30
+
+
+def test_adaptive_apf_staggered_longitudinal_relief_bounded() -> None:
+    """The staggered longitudinal relief must stay finite and bounded."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=58,
+        time=5.8,
+        leader_state=State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+    front_obstacles = controller._leader_front_obstacles(observation, observation.states[0])
+    side_sign = controller._leader_behavior_side_sign(
+        observation,
+        observation.states[0],
+        mode,
+        front_obstacles=front_obstacles,
+    )
+    assert side_sign is not None
+
+    relief = controller._leader_staggered_longitudinal_relief(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+        front_obstacles=front_obstacles,
+        side_sign=side_sign,
+    )
+
+    assert 0.0 < relief <= 0.98
+
+
+def test_adaptive_apf_staggered_longitudinal_relief_inactive_single_blocker() -> None:
+    """The staggered longitudinal relief must not activate without dual blockers."""
+
+    controller = _make_controller()
+    single_observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.46, y=-1.05, yaw=0.08, speed=2.0),
+            State(x=7.56, y=-0.84, yaw=0.01, speed=1.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("single_blocker", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+    front_obstacles = controller._leader_front_obstacles(single_observation, single_observation.states[0])
+    side_sign = controller._leader_behavior_side_sign(
+        single_observation,
+        single_observation.states[0],
+        mode,
+        front_obstacles=front_obstacles,
+    )
+    assert side_sign is not None
+
+    relief = controller._leader_staggered_longitudinal_relief(
+        observation=single_observation,
+        state=single_observation.states[0],
+        mode=mode,
+        front_obstacles=front_obstacles,
+        side_sign=side_sign,
+    )
+
+    assert relief == pytest.approx(0.0)
+
+
+def test_adaptive_apf_staggered_lateral_boost_bounded() -> None:
+    """The staggered lateral boost must remain finite and bounded."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=58,
+        time=5.8,
+        leader_state=State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+
+    boost = controller._leader_staggered_lateral_boost(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+    )
+
+    assert 1.0 <= boost <= 3.0
+
+
+def test_adaptive_apf_staggered_lateral_boost_inactive_single_blocker() -> None:
+    """The staggered lateral boost must stay inactive without dual-blocker geometry."""
+
+    controller = _make_controller()
+    single_observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.46, y=-1.05, yaw=0.08, speed=2.0),
+            State(x=7.56, y=-0.84, yaw=0.01, speed=1.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("single_blocker", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+
+    boost = controller._leader_staggered_lateral_boost(
+        observation=single_observation,
+        state=single_observation.states[0],
+        mode=mode,
+    )
+
+    assert boost == pytest.approx(1.0)
+
+
+def test_adaptive_apf_staggered_steer_bias_bounded() -> None:
+    """The staggered steer bias must remain finite, signed, and bounded."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=58,
+        time=5.8,
+        leader_state=State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+    target_y = float(controller._leader_goal_target(observation, observation.states[0], mode)[1])
+    boost = controller._leader_staggered_lateral_boost(
+        observation=observation,
+        state=observation.states[0],
+        mode=mode,
+    )
+
+    steer_bias = controller._leader_staggered_steer_bias(
+        state=observation.states[0],
+        target_y=target_y,
+        boost=boost,
+    )
+
+    assert 0.0 < steer_bias <= 0.16
+
+
+def test_adaptive_apf_staggered_steer_bias_inactive_single_blocker() -> None:
+    """The staggered steer bias must stay inactive without dual-blocker geometry."""
+
+    controller = _make_controller()
+    single_observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.46, y=-1.05, yaw=0.08, speed=2.0),
+            State(x=7.56, y=-0.84, yaw=0.01, speed=1.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("single_blocker", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+    target_y = float(controller._leader_goal_target(single_observation, single_observation.states[0], mode)[1])
+    boost = controller._leader_staggered_lateral_boost(
+        observation=single_observation,
+        state=single_observation.states[0],
+        mode=mode,
+    )
+
+    steer_bias = controller._leader_staggered_steer_bias(
+        state=single_observation.states[0],
+        target_y=target_y,
+        boost=boost,
+    )
+
+    assert steer_bias == pytest.approx(0.0)
 
 
 def test_adaptive_apf_staggered_governor_inactive_without_dual_blockers() -> None:

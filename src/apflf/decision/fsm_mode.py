@@ -150,6 +150,12 @@ class FSMModeDecision(ModeDecisionModule):
             self._pending_count = 0
             return self._current_mode
 
+        if self._is_hazard_side_relock(current_mode=self._current_mode, candidate_mode=candidate_mode):
+            self._current_mode = candidate_mode
+            self._pending_mode = candidate_mode
+            self._pending_count = 0
+            return self._current_mode
+
         if candidate_mode != self._pending_mode:
             self._pending_mode = candidate_mode
             self._pending_count = 1
@@ -293,7 +299,7 @@ class FSMModeDecision(ModeDecisionModule):
         leader = observation.states[0]
         center_y = observation.road.lane_center_y
         lateral_commitment = center_y - leader.y if side == "right" else leader.y - center_y
-        commitment_threshold = max(0.34 * self.vehicle_width, 0.18 * observation.road.half_width)
+        commitment_threshold = max(0.33 * self.vehicle_width, 0.17 * observation.road.half_width)
         if lateral_commitment < commitment_threshold:
             return side
 
@@ -535,3 +541,16 @@ class FSMModeDecision(ModeDecisionModule):
         if behavior.endswith("_right"):
             return "right"
         return None
+
+    def _is_hazard_side_relock(self, *, current_mode: str, candidate_mode: str) -> bool:
+        current = parse_mode_label(current_mode)
+        candidate = parse_mode_label(candidate_mode)
+        current_side = self._behavior_side(current.behavior)
+        candidate_side = self._behavior_side(candidate.behavior)
+        if current_side is None or candidate_side is None or current_side == candidate_side:
+            return False
+        if not current.behavior.startswith(("yield_", "escape_")):
+            return False
+        if not candidate.behavior.startswith(("yield_", "escape_")):
+            return False
+        return current.topology == candidate.topology and current.gain == candidate.gain

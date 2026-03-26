@@ -127,7 +127,7 @@ class APFLFController(LeaderFollowerMixin, APFController):
             return -side_sign
         center_y = observation.road.lane_center_y
         nominal_offset = side_sign * (state.y - center_y)
-        commitment_threshold = max(0.34 * self.config.vehicle_width, 0.18 * observation.road.half_width)
+        commitment_threshold = max(0.33 * self.config.vehicle_width, 0.17 * observation.road.half_width)
         if nominal_offset < commitment_threshold:
             return side_sign
 
@@ -239,6 +239,86 @@ class APFLFController(LeaderFollowerMixin, APFController):
             blend = max(blend, 0.35)
         return float(np.clip(blend, 0.0, 1.0))
 
+    def _leader_relocked_edge_hold_activation(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        front_obstacles: tuple[ObstacleState, ...],
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+    ) -> float:
+        """Return the relocked edge-hold activation while the new corridor is not yet committed."""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or nominal_side_sign != side_sign or not relevant_obstacles:
+            return 0.0
+
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not alternate_relevant:
+            return 0.0
+
+        center_y = observation.road.lane_center_y
+        new_side_commitment = max(side_sign * (state.y - center_y), 0.0)
+        commitment_threshold = max(0.45 * self.config.vehicle_width, 0.16 * observation.road.half_width)
+        a_commitment = float(
+            np.clip(
+                (commitment_threshold - new_side_commitment) / max(commitment_threshold, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        if a_commitment <= 1e-6:
+            return 0.0
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        relevant_front_gap = min(
+            obstacle.x + 0.5 * obstacle.length - state_front_x for obstacle in relevant_obstacles
+        )
+        hold_full_gap = max(0.35 * self.config.obstacle_influence_distance, 1.25 * self.config.vehicle_length)
+        release_gap = -0.25 * self.config.vehicle_length
+        a_blocker = float(
+            np.clip(
+                (relevant_front_gap - release_gap) / max(hold_full_gap - release_gap, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        return float(a_commitment * a_blocker)
+
+    def _leader_relocked_centerline_blend_hold(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        front_obstacles: tuple[ObstacleState, ...],
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+        base_blend: float,
+    ) -> float:
+        """Keep relocked target_y hugging the blocker edge until the new corridor is committed."""
+
+        if base_blend <= 0.0:
+            return float(base_blend)
+
+        hold_activation = self._leader_relocked_edge_hold_activation(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+        )
+        if hold_activation <= 1e-6:
+            return float(base_blend)
+        return float((1.0 - hold_activation) * base_blend)
+
     def _leader_flip_overshoot(
         self,
         *,
@@ -265,6 +345,77 @@ class APFLFController(LeaderFollowerMixin, APFController):
 
         max_overshoot = max(0.55 * self.config.vehicle_width, 0.35 * self.config.road_influence_margin)
         return float(side_sign * activation * max_overshoot)
+
+    def _leader_relocked_target_x_hold(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str | None,
+        side_sign: float,
+        target_y: float,
+        relevant_obstacles: tuple[ObstacleState, ...],
+        base_target_x: float,
+        near_preview_x: float,
+    ) -> float:
+        """Keep the relocked leader preview local until the new-side lateral commitment is established."""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or nominal_side_sign != side_sign or not relevant_obstacles:
+            return float(base_target_x)
+
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not alternate_relevant:
+            return float(base_target_x)
+
+        lateral_error = abs(float(target_y - state.y))
+        lateral_start = 0.30 * self.config.vehicle_width
+        lateral_full = max(1.25 * self.config.vehicle_width, 0.40 * observation.road.half_width)
+        a_lateral = float(
+            np.clip(
+                (lateral_error - lateral_start) / max(lateral_full - lateral_start, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        if a_lateral <= 1e-6:
+            return float(base_target_x)
+
+        center_y = observation.road.lane_center_y
+        new_side_commitment = max(side_sign * (state.y - center_y), 0.0)
+        commitment_threshold = max(0.45 * self.config.vehicle_width, 0.16 * observation.road.half_width)
+        a_commitment = float(
+            np.clip(
+                (commitment_threshold - new_side_commitment) / max(commitment_threshold, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        if a_commitment <= 1e-6:
+            return float(base_target_x)
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        alternate_rear_gap = min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in alternate_relevant
+        )
+        release_gap = -0.80 * self.config.vehicle_length
+        a_overlap = float(
+            np.clip(
+                (alternate_rear_gap - release_gap) / max(-release_gap, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        if a_overlap <= 1e-6:
+            return float(base_target_x)
+
+        hold_activation = a_lateral * a_commitment * a_overlap
+        return float((1.0 - hold_activation) * base_target_x + hold_activation * near_preview_x)
 
     def _leader_hazard_target_x(
         self,
@@ -322,7 +473,17 @@ class APFLFController(LeaderFollowerMixin, APFController):
                     max(state.x + 1.0 * self.config.vehicle_length, nearest_obstacle.x),
                 )
             )
-            return float((1.0 - activation) * far_preview_x + activation * near_preview_x)
+            base_target_x = float((1.0 - activation) * far_preview_x + activation * near_preview_x)
+            return self._leader_relocked_target_x_hold(
+                observation=observation,
+                state=state,
+                mode=mode,
+                side_sign=side_sign,
+                target_y=float(target_y),
+                relevant_obstacles=relevant_obstacles,
+                base_target_x=base_target_x,
+                near_preview_x=near_preview_x,
+            )
 
         if not relevant_obstacles:
             return observation.goal_x
@@ -388,6 +549,15 @@ class APFLFController(LeaderFollowerMixin, APFController):
             front_obstacles=front_obstacles,
             relevant_obstacles=relevant_obstacles,
             side_sign=side_sign,
+        )
+        centerline_blend = self._leader_relocked_centerline_blend_hold(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+            base_blend=centerline_blend,
         )
         target_y = (1.0 - centerline_blend) * edge_target_y + centerline_blend * channel_center_y
         max_center_offset = max(observation.road.half_width - 0.55 * self.config.vehicle_width, 0.0)

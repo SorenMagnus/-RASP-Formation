@@ -111,6 +111,114 @@ class AdaptiveAPFController(APFLFController):
         normalized = (raw - baseline) / max(1.0 - baseline, 1e-6)
         return float(np.clip(normalized, 0.0, 1.0))
 
+    def _smoothstep01(self, value: float) -> float:
+        """Return a C1-continuous activation in [0, 1]."""
+
+        clamped = float(np.clip(value, 0.0, 1.0))
+        return float(clamped * clamped * (3.0 - 2.0 * clamped))
+
+    def _rising_activation(
+        self,
+        value: float,
+        *,
+        start: float,
+        full: float,
+    ) -> float:
+        """Return a smooth activation that rises from 0 to 1 over [start, full]."""
+
+        if value <= start:
+            return 0.0
+        if value >= full:
+            return 1.0
+        raw = (value - start) / max(full - start, 1e-6)
+        return self._smoothstep01(raw)
+
+    def _falling_activation(
+        self,
+        value: float,
+        *,
+        full: float,
+        zero: float,
+    ) -> float:
+        """Return a smooth activation that falls from 1 to 0 over [full, zero]."""
+
+        if value <= full:
+            return 1.0
+        if value >= zero:
+            return 0.0
+        raw = (zero - value) / max(zero - full, 1e-6)
+        return self._smoothstep01(raw)
+
+    def _leader_nearest_rear_gap(
+        self,
+        *,
+        state: State,
+        obstacles: tuple[ObstacleState, ...],
+    ) -> float:
+        """Return the smallest rear-gap from the leader front bumper to the obstacle set."""
+
+        if not obstacles:
+            return float("inf")
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        return min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in obstacles
+        )
+
+    def _leader_staggered_hazard_activation(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        front_obstacles: tuple[ObstacleState, ...],
+        target_y: float | None,
+    ) -> float:
+        """Detect the dual-blocker hazard window that needs extra leader-only longitudinal restraint."""
+
+        nominal_side_sign = self._mode_behavior_side_sign(mode)
+        if nominal_side_sign is None or target_y is None:
+            return 0.0
+
+        nominal_obstacles = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=nominal_side_sign,
+        )
+        alternate_obstacles = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-nominal_side_sign,
+        )
+        if not nominal_obstacles or not alternate_obstacles:
+            return 0.0
+
+        nominal_gap = self._leader_nearest_rear_gap(
+            state=state,
+            obstacles=nominal_obstacles,
+        )
+        alternate_gap = self._leader_nearest_rear_gap(
+            state=state,
+            obstacles=alternate_obstacles,
+        )
+        lateral_error = abs(float(target_y - state.y))
+
+        a_nominal_gap = self._falling_activation(
+            nominal_gap,
+            full=max(0.12 * self.config.obstacle_influence_distance, 0.15 * self.config.vehicle_length),
+            zero=max(0.45 * self.config.obstacle_influence_distance, 0.45 * self.config.vehicle_length),
+        )
+        a_alternate_gap = self._falling_activation(
+            alternate_gap,
+            full=max(0.08 * self.config.obstacle_influence_distance, 0.30 * self.config.vehicle_length),
+            zero=max(0.28 * self.config.obstacle_influence_distance, 0.85 * self.config.vehicle_length),
+        )
+        a_lateral = self._rising_activation(
+            lateral_error,
+            start=0.30 * self.config.vehicle_width,
+            full=max(1.10 * self.config.vehicle_width, 0.45 * observation.road.half_width),
+        )
+        return float(np.clip(a_nominal_gap * a_alternate_gap * a_lateral, 0.0, 1.0))
+
     def _dynamic_obstacle_factor(self, state: State, obstacle: ObstacleState) -> float:
         """复用 ST-APF 时空增强项。"""
 
@@ -207,6 +315,109 @@ class AdaptiveAPFController(APFLFController):
             reduction = min(reduction + lateral_boost, 0.90)
         return np.asarray([float(force[0]), (1.0 - reduction) * float(force[1])], dtype=float)
 
+    def _shape_leader_staggered_obstacle_force(
+        self,
+        *,
+        force: np.ndarray,
+        reduction: float,
+    ) -> np.ndarray:
+        """Attenuate only the adverse longitudinal repulsion in staggered dual-blocker corridors."""
+
+        if reduction <= 0.0 or float(force[0]) >= 0.0:
+            return force
+        clamped_reduction = float(np.clip(reduction, 0.0, 0.98))
+        return np.asarray(
+            [(1.0 - clamped_reduction) * float(force[0]), float(force[1])],
+            dtype=float,
+        )
+
+    def _leader_staggered_longitudinal_relief(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        front_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+    ) -> float:
+        """Return a bounded x-repulsion attenuation factor in staggered dual-blocker geometry."""
+
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not nominal_relevant or not alternate_relevant:
+            return 0.0
+        if {
+            obstacle.obstacle_id for obstacle in nominal_relevant
+        } == {
+            obstacle.obstacle_id for obstacle in alternate_relevant
+        }:
+            return 0.0
+
+        target_y = self._leader_behavior_target_y(observation, state, mode)
+        if target_y is None:
+            return 0.0
+        lateral_error = abs(float(target_y - state.y))
+        lateral_dead_zone = 0.25 * self.config.vehicle_width
+        if lateral_error <= lateral_dead_zone:
+            return 0.0
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nominal_rear_gap = min(
+            obs.x - 0.5 * obs.length - state_front_x for obs in nominal_relevant
+        )
+        alternate_rear_gap = min(
+            obs.x - 0.5 * obs.length - state_front_x for obs in alternate_relevant
+        )
+        engage_distance = max(
+            0.25 * self.config.obstacle_influence_distance,
+            1.0 * self.config.vehicle_length,
+        )
+        alternate_lookahead = max(
+            0.5 * self.config.obstacle_influence_distance,
+            1.5 * self.config.vehicle_length,
+        )
+        if alternate_rear_gap < -0.5 * self.config.vehicle_length:
+            return 0.0
+        if alternate_rear_gap > alternate_lookahead:
+            return 0.0
+
+        a_nominal_gap = float(
+            np.clip(
+                (engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        a_alternate_gap = float(
+            np.clip(
+                (alternate_lookahead - alternate_rear_gap) / max(alternate_lookahead, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        lateral_window = max(
+            1.5 * self.config.vehicle_width,
+            0.5 * observation.road.half_width,
+        )
+        a_lateral = float(
+            np.clip(
+                (lateral_error - lateral_dead_zone)
+                / max(lateral_window - lateral_dead_zone, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        reduction = 0.40 * a_nominal_gap + 0.35 * a_alternate_gap + 0.35 * a_lateral
+        return float(np.clip(reduction, 0.0, 0.98))
+
     def _adaptive_obstacle_force(
         self,
         *,
@@ -268,6 +479,13 @@ class AdaptiveAPFController(APFLFController):
 
         front_ids = {obstacle.obstacle_id for obstacle in front_obstacles}
         relevant_ids = {obstacle.obstacle_id for obstacle in relevant_obstacles}
+        staggered_relief = self._leader_staggered_longitudinal_relief(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
         total = np.zeros(2, dtype=float)
         for obstacle in observation.obstacles:
             force = self._obstacle_force(state, obstacle, repulsive_gain=repulsive_gain)
@@ -277,6 +495,11 @@ class AdaptiveAPFController(APFLFController):
                     obstacle=obstacle,
                     side_sign=side_sign,
                     force=force,
+                )
+            if obstacle.obstacle_id in front_ids and staggered_relief > 0.0:
+                force = self._shape_leader_staggered_obstacle_force(
+                    force=force,
+                    reduction=staggered_relief,
                 )
             total += force
         return total
@@ -323,12 +546,23 @@ class AdaptiveAPFController(APFLFController):
         nominal_side_sign = self._mode_behavior_side_sign(mode)
         lateral_error = abs(float(target_y - state.y))
         local_flip_active = nominal_side_sign is not None and nominal_side_sign != side_sign
-        if not local_flip_active and lateral_error <= 0.50 * self.config.vehicle_width:
+        staggered_activation = self._leader_staggered_hazard_activation(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            target_y=target_y,
+        )
+        if (
+            not local_flip_active
+            and lateral_error <= 0.50 * self.config.vehicle_width
+            and staggered_activation <= 0.0
+        ):
             return base_target_speed
 
-        state_front_x = state.x + 0.5 * self.config.vehicle_length
-        nearest_gap = min(
-            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in relevant_obstacles
+        nearest_gap = self._leader_nearest_rear_gap(
+            state=state,
+            obstacles=relevant_obstacles,
         )
         engage_distance = max(0.25 * self.config.obstacle_influence_distance, 1.0 * self.config.vehicle_length)
         if nearest_gap >= engage_distance:
@@ -341,6 +575,10 @@ class AdaptiveAPFController(APFLFController):
         hazard_speed_cap = max(0.60, gap_speed * alignment_scale)
         if local_flip_active:
             hazard_speed_cap = min(hazard_speed_cap, state.speed + 0.35)
+        if staggered_activation > 0.0:
+            # Keep the gap-speed cap as the backbone and only add a bounded,
+            # monotone compression inside the staggered dual-blocker window.
+            hazard_speed_cap = max(0.60, hazard_speed_cap * (1.0 - 0.25 * staggered_activation))
         return float(min(base_target_speed, hazard_speed_cap))
 
     def _leader_staggered_hazard_speed_cap(
@@ -404,8 +642,10 @@ class AdaptiveAPFController(APFLFController):
         target_y = self._leader_behavior_target_y(observation, state, mode)
         if target_y is None:
             return base_target_speed
+        if state.speed <= 0.35:
+            return base_target_speed
         lateral_error = abs(float(target_y - state.y))
-        lateral_dead_zone = 0.40 * self.config.vehicle_width
+        lateral_dead_zone = 0.25 * self.config.vehicle_width
         if lateral_error <= lateral_dead_zone:
             return base_target_speed
 
@@ -459,13 +699,127 @@ class AdaptiveAPFController(APFLFController):
         min_gap = min(max(nominal_rear_gap, 0.0), max(alternate_rear_gap, 0.0))
         max_brake = max(abs(self.bounds.accel_min), 1e-6)
         staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
-        blend = float(np.clip(a_staggered * 4.5, 0.0, 0.65))
-        crawl_floor = 0.45
+        blend = float(np.clip(a_staggered * 8.0, 0.0, 0.80))
+        # Keep a small rolling floor while the leader is still carrying speed,
+        # so the staggered governor does not collapse straight to a hard crawl
+        # once longitudinal relief has already opened a feasible forward channel.
+        crawl_floor = float(
+            np.clip(
+                0.30 + 0.25 * max(state.speed - 0.35, 0.0),
+                0.30,
+                0.70,
+            )
+        )
         staggered_cap = max(
             crawl_floor,
             (1.0 - blend) * base_target_speed + blend * staggered_gap_speed,
         )
         return float(min(base_target_speed, staggered_cap))
+
+    def _leader_staggered_lateral_boost(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+    ) -> float:
+        """Return a bounded leader guidance multiplier in staggered dual-blocker corridors."""
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return 1.0
+
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        if not front_obstacles:
+            return 1.0
+
+        side_sign = self._leader_behavior_side_sign(
+            observation,
+            state,
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return 1.0
+
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not nominal_relevant or not alternate_relevant:
+            return 1.0
+
+        target_y = self._leader_behavior_target_y(observation, state, mode)
+        if target_y is None:
+            return 1.0
+        lateral_error = abs(float(target_y - state.y))
+        lateral_dead_zone = 0.25 * self.config.vehicle_width
+        if lateral_error <= lateral_dead_zone:
+            return 1.0
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nominal_rear_gap = min(
+            obs.x - 0.5 * obs.length - state_front_x for obs in nominal_relevant
+        )
+        engage_distance = max(
+            0.25 * self.config.obstacle_influence_distance,
+            1.0 * self.config.vehicle_length,
+        )
+        a_gap = float(
+            np.clip(
+                (engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+
+        a_lateral = float(
+            np.clip(
+                (lateral_error - lateral_dead_zone) / max(self.config.vehicle_width, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+
+        boost_activation = a_gap * a_lateral
+        if boost_activation <= 1e-6:
+            return 1.0
+
+        boost_gain = 2.2
+        return float(1.0 + boost_gain * boost_activation)
+
+    def _leader_staggered_steer_bias(
+        self,
+        *,
+        state: State,
+        target_y: float,
+        boost: float,
+    ) -> float:
+        """Return a bounded leader steer bias once staggered dual-blocker guidance is active."""
+
+        if boost <= 1.0:
+            return 0.0
+        lateral_error = float(target_y - state.y)
+        lateral_dead_zone = 0.25 * self.config.vehicle_width
+        if abs(lateral_error) <= lateral_dead_zone:
+            return 0.0
+
+        lateral_activation = float(
+            np.clip(
+                (abs(lateral_error) - lateral_dead_zone) / max(1.25 * self.config.vehicle_width, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        boost_activation = float(np.clip((boost - 1.0) / 1.2, 0.0, 1.0))
+        max_bias = 0.16
+        return float(np.sign(lateral_error) * max_bias * lateral_activation * boost_activation)
 
     def _reference_speed(self, observation: Observation, index: int, mode: str) -> float:
         """Construct reference speed with leader hazard-speed governor and staggered corridor governor."""
@@ -509,15 +863,14 @@ class AdaptiveAPFController(APFLFController):
             return scaled_target_speed
 
         clipped_force_x = float(np.clip(total_force[0], -8.0, 8.0))
-        if clipped_force_x > -6.0:
-            return scaled_target_speed
-
+        speed_gain = max(self.config.speed_gain, 1e-6)
         desired_min_accel = -0.03
-        speed_floor = state.speed + (desired_min_accel - 0.08 * clipped_force_x) / max(
-            self.config.speed_gain,
-            1e-6,
-        )
-        return float(max(scaled_target_speed, speed_floor))
+        desired_max_accel = 0.0
+        speed_floor = state.speed + (desired_min_accel - 0.08 * clipped_force_x) / speed_gain
+        speed_ceiling = state.speed + (desired_max_accel - 0.08 * clipped_force_x) / speed_gain
+        if speed_floor > speed_ceiling:
+            speed_floor, speed_ceiling = speed_ceiling, speed_floor
+        return float(np.clip(scaled_target_speed, speed_floor, speed_ceiling))
 
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """输出风险自适应 APF-LF 名义控制。"""
@@ -544,6 +897,7 @@ class AdaptiveAPFController(APFLFController):
         leader_force_norm = 0.0
         cached_forces: list[np.ndarray] = []
         cached_speeds: list[float] = []
+        cached_steer_biases: list[float] = []
         for index, state in enumerate(observation.states):
             clearance, closing_speed, ttc, boundary_margin = self._risk_features(observation, state)
             risk_score = self.compute_risk_score(
@@ -564,9 +918,22 @@ class AdaptiveAPFController(APFLFController):
                     target_y=float(target[1]),
                     road_gain=road_gain,
                 )
+                staggered_boost = self._leader_staggered_lateral_boost(
+                    observation=observation,
+                    state=state,
+                    mode=mode,
+                )
+                leader_steer_bias = self._leader_staggered_steer_bias(
+                    state=state,
+                    target_y=float(target[1]),
+                    boost=staggered_boost,
+                )
+                if staggered_boost > 1.0:
+                    leader_guidance_force = leader_guidance_force * staggered_boost
             else:
                 target = self._desired_global_position(observation, index, mode)
                 leader_guidance_force = np.zeros(2, dtype=float)
+                leader_steer_bias = 0.0
             attractive_force = self._attractive_force(state, target)
             formation_force = self._formation_force(observation, index, mode)
             consensus_force = self._consensus_force(observation, index, mode)
@@ -608,6 +975,7 @@ class AdaptiveAPFController(APFLFController):
                 )
             cached_forces.append(total_force)
             cached_speeds.append(target_speed)
+            cached_steer_biases.append(leader_steer_bias if index == 0 else 0.0)
             if index == 0:
                 leader_force_norm = float(np.linalg.norm(total_force))
 
@@ -620,12 +988,22 @@ class AdaptiveAPFController(APFLFController):
         elif self._escape_steps_remaining > 0:
             cached_forces[0] = cached_forces[0] + self._escape_force(observation.states[0], observation)
 
-        for state, force, target_speed in zip(observation.states, cached_forces, cached_speeds, strict=True):
-            actions.append(
-                self._force_to_action(
-                    state=state,
-                    force=force,
-                    target_speed=target_speed,
-                )
+        for state, force, target_speed, steer_bias in zip(
+            observation.states,
+            cached_forces,
+            cached_speeds,
+            cached_steer_biases,
+            strict=True,
+        ):
+            action = self._force_to_action(
+                state=state,
+                force=force,
+                target_speed=target_speed,
             )
+            if abs(steer_bias) > 1e-9:
+                action = Action(
+                    accel=action.accel,
+                    steer=float(np.clip(action.steer + steer_bias, self.bounds.steer_min, self.bounds.steer_max)),
+                )
+            actions.append(action)
         return tuple(actions)
