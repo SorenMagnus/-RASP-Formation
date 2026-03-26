@@ -22,8 +22,14 @@ class DWAController(APFLFController):
         self.dynamics = VehicleDynamics(wheelbase=float(wheelbase), bounds=self.bounds)
         self.rollout_steps = max(3, int(math.ceil(0.6 / self.dt)))
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         actions: list[Action] = []
+        del theta
         for index, state in enumerate(observation.states):
             target = self._behavior_target(observation=observation, index=index, mode=mode)
             target_speed = self._mode_adjusted_target_speed(

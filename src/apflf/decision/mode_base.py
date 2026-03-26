@@ -5,7 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from apflf.utils.types import DecisionConfig, Observation
+from apflf.utils.types import (
+    DEFAULT_THETA_VECTOR,
+    DecisionConfig,
+    DecisionDiagnostics,
+    ModeDecision,
+    Observation,
+)
 
 DEFAULT_MODE_LABEL = "topology=line|behavior=follow|gain=nominal"
 SUPPORTED_MODE_TOPOLOGIES = {"line", "diamond"}
@@ -74,9 +80,41 @@ def parse_mode_label(mode: str) -> ParsedMode:
 class ModeDecisionModule(ABC):
     """Discrete mode decision interface."""
 
+    def reset(self, seed: int | None = None) -> None:
+        """Reset any internal state used by the decision module."""
+
+        del seed
+
     @abstractmethod
+    def select(self, observation: Observation, step: int) -> ModeDecision:
+        """Select a structured decision from the current observation."""
+
     def select_mode(self, observation: Observation) -> str:
-        """Select a discrete mode from the current observation."""
+        """Backward-compatible string-only mode selection."""
+
+        return self.select(observation, observation.step_index).mode
+
+    def observe_feedback(
+        self,
+        *,
+        safety_corrections: tuple[float, ...],
+        safety_slacks: tuple[float, ...],
+        safety_fallbacks: tuple[bool, ...],
+    ) -> None:
+        """Consume previous-step safety feedback for stateful decision modules."""
+
+        del safety_corrections, safety_slacks, safety_fallbacks
+
+    def consume_step_diagnostics(self) -> DecisionDiagnostics:
+        """Return step diagnostics for persistence and reset the local cache."""
+
+        return DecisionDiagnostics()
+
+    @abstractmethod
+    def default_theta(self) -> tuple[float, float, float, float]:
+        """Return the exact theta that reproduces the white-box baseline."""
+
+        return DEFAULT_THETA_VECTOR
 
 
 class StaticModeDecision(ModeDecisionModule):
@@ -85,9 +123,17 @@ class StaticModeDecision(ModeDecisionModule):
     def __init__(self, default_mode: str) -> None:
         self.default_mode = parse_mode_label(default_mode).to_label()
 
-    def select_mode(self, observation: Observation) -> str:
-        del observation
-        return self.default_mode
+    def select(self, observation: Observation, step: int) -> ModeDecision:
+        del observation, step
+        return ModeDecision(
+            mode=self.default_mode,
+            theta=self.default_theta(),
+            source="static",
+            confidence=1.0,
+        )
+
+    def default_theta(self) -> tuple[float, float, float, float]:
+        return DEFAULT_THETA_VECTOR
 
 
 def build_mode_decision(
@@ -109,5 +155,32 @@ def build_mode_decision(
             vehicle_length=vehicle_length,
             vehicle_width=vehicle_width,
             safe_distance=safe_distance,
+        )
+    if config.kind == "rl":
+        from apflf.decision.fsm_mode import FSMModeDecision
+        from apflf.decision.rl_mode import RLSupervisor, load_rl_policy_bundle
+
+        fallback_fsm = FSMModeDecision(
+            config=config,
+            vehicle_length=vehicle_length,
+            vehicle_width=vehicle_width,
+            safe_distance=safe_distance,
+        )
+        policy_bundle = load_rl_policy_bundle(
+            checkpoint_path=config.rl.checkpoint_path,
+            theta_config=config.rl.theta,
+        )
+        return RLSupervisor(
+            fallback_fsm=fallback_fsm,
+            policy=policy_bundle.policy,
+            normalizer=policy_bundle.normalizer,
+            constraints=config.rl.theta,
+            confidence_threshold=config.rl.confidence_threshold,
+            ood_threshold=config.rl.ood_threshold,
+            deterministic_eval=config.rl.deterministic_eval,
+            vehicle_length=vehicle_length,
+            vehicle_width=vehicle_width,
+            observation_history=config.rl.observation_history,
+            interaction_limit=config.rl.interaction_limit,
         )
     raise ValueError(f"Unsupported decision module: {config.kind}")

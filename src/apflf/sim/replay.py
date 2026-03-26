@@ -14,11 +14,14 @@ from apflf.env.road import Road
 from apflf.utils.config import load_config
 from apflf.utils.types import (
     Action,
+    DEFAULT_THETA_VECTOR,
+    DecisionDiagnostics,
     NominalDiagnostics,
     NominalForceBreakdown,
     ObstacleState,
     Snapshot,
     State,
+    ZERO_THETA_VECTOR,
 )
 
 
@@ -184,6 +187,41 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
             "leader_force_total",
             default=np.zeros((safe_actions.shape[0], 2), dtype=float),
         )
+        decision_sources = _optional_array(
+            data,
+            "decision_sources",
+            default=np.full(safe_actions.shape[0], "fsm", dtype="<U16"),
+        )
+        decision_confidences = _optional_array(
+            data,
+            "decision_confidences",
+            default=np.ones(safe_actions.shape[0], dtype=float),
+        )
+        decision_thetas = _optional_array(
+            data,
+            "decision_thetas",
+            default=np.tile(np.asarray(DEFAULT_THETA_VECTOR, dtype=float), (safe_actions.shape[0], 1)),
+        )
+        decision_theta_deltas = _optional_array(
+            data,
+            "decision_theta_deltas",
+            default=np.tile(np.asarray(ZERO_THETA_VECTOR, dtype=float), (safe_actions.shape[0], 1)),
+        )
+        decision_rl_fallbacks = _optional_array(
+            data,
+            "decision_rl_fallbacks",
+            default=np.zeros(safe_actions.shape[0], dtype=bool),
+        )
+        decision_theta_clipped = _optional_array(
+            data,
+            "decision_theta_clipped",
+            default=np.zeros(safe_actions.shape[0], dtype=bool),
+        )
+        decision_normalized_obs_max_abs = _optional_array(
+            data,
+            "decision_normalized_obs_max_abs",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
         step_runtimes = _optional_array(
             data,
             "step_runtimes",
@@ -251,6 +289,15 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
                         escape=tuple(float(value) for value in leader_force_escape[step_index - 1]),
                         total=tuple(float(value) for value in leader_force_total[step_index - 1]),
                     ),
+                ),
+                decision_diagnostics=DecisionDiagnostics(
+                    source=str(decision_sources[step_index - 1]),
+                    confidence=float(decision_confidences[step_index - 1]),
+                    theta=tuple(float(value) for value in decision_thetas[step_index - 1]),
+                    theta_delta=tuple(float(value) for value in decision_theta_deltas[step_index - 1]),
+                    rl_fallback=bool(decision_rl_fallbacks[step_index - 1]),
+                    theta_clipped=bool(decision_theta_clipped[step_index - 1]),
+                    normalized_obs_max_abs=float(decision_normalized_obs_max_abs[step_index - 1]),
                 ),
             )
         )

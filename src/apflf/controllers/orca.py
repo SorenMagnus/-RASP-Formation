@@ -20,8 +20,14 @@ class ORCAController(APFLFController):
         self.dt = max(float(dt), 1e-3)
         self.time_horizon = max(1.0, min(4.0, self.config.ttc_threshold))
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         actions: list[Action] = []
+        del theta
         for index, state in enumerate(observation.states):
             target = self._behavior_target(observation=observation, index=index, mode=mode)
             target_speed = self._mode_adjusted_target_speed(

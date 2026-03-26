@@ -818,58 +818,67 @@ class APFLFController(LeaderFollowerMixin, APFController):
         )
         return target_speed
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """输出 APF-LF 融合名义控制。"""
 
         actions: list[Action] = []
-        repulsive_scale, road_scale, _ = self._mode_gain_scales(mode)
-        for index, state in enumerate(observation.states):
-            road_gain = self.config.road_gain * road_scale
-            if index == 0:
-                target = self._leader_goal_target(observation, state, mode)
-                leader_guidance_force = self._leader_bypass_force(
-                    observation,
-                    state,
-                    mode,
-                    target_y=float(target[1]),
-                    road_gain=road_gain,
-                )
-            else:
-                target = self._desired_global_position(observation, index, mode)
-                leader_guidance_force = np.zeros(2, dtype=float)
-            attractive_force = self._attractive_force(state, target)
-            formation_force = self._formation_force(observation, index, mode)
-            consensus_force = self._consensus_force(observation, index, mode)
-            road_force = self._road_force(state, road_gain=road_gain)
-            obstacle_force = self._sum_obstacle_forces(
-                observation=observation,
-                index=index,
-                repulsive_gain=self.config.repulsive_gain * repulsive_scale,
-            )
-            peer_force = self._sum_peer_forces(
-                observation=observation,
-                index=index,
-                repulsive_gain=self.config.repulsive_gain * repulsive_scale,
-            )
-            behavior_force = self._mode_behavior_force(mode=mode, road_gain=road_gain, index=index)
-            total_force = (
-                attractive_force
-                + formation_force
-                + consensus_force
-                + road_force
-                + obstacle_force
-                + peer_force
-                + behavior_force
-                + leader_guidance_force
-            )
-            actions.append(
-                self._force_to_action(
-                    state=state,
-                    force=total_force,
-                    target_speed=self._mode_adjusted_target_speed(
-                        self._reference_speed(observation, index, mode),
+        mode_repulsive_scale, mode_road_scale, _ = self._mode_gain_scales(mode)
+        theta_repulsive_scale, theta_road_scale, theta_formation_scale, _ = self._theta_gain_scales(theta)
+        repulsive_scale = mode_repulsive_scale * theta_repulsive_scale
+        road_scale = mode_road_scale * theta_road_scale
+        with self._theta_context(theta):
+            for index, state in enumerate(observation.states):
+                road_gain = self.config.road_gain * road_scale
+                if index == 0:
+                    target = self._leader_goal_target(observation, state, mode)
+                    leader_guidance_force = self._leader_bypass_force(
+                        observation,
+                        state,
                         mode,
-                    ),
+                        target_y=float(target[1]),
+                        road_gain=road_gain,
+                    )
+                else:
+                    target = self._desired_global_position(observation, index, mode)
+                    leader_guidance_force = np.zeros(2, dtype=float)
+                attractive_force = self._attractive_force(state, target)
+                formation_force = self._formation_force(observation, index, mode) * theta_formation_scale
+                consensus_force = self._consensus_force(observation, index, mode) * theta_formation_scale
+                road_force = self._road_force(state, road_gain=road_gain)
+                obstacle_force = self._sum_obstacle_forces(
+                    observation=observation,
+                    index=index,
+                    repulsive_gain=self.config.repulsive_gain * repulsive_scale,
                 )
-            )
+                peer_force = self._sum_peer_forces(
+                    observation=observation,
+                    index=index,
+                    repulsive_gain=self.config.repulsive_gain * repulsive_scale,
+                )
+                behavior_force = self._mode_behavior_force(mode=mode, road_gain=road_gain, index=index)
+                total_force = (
+                    attractive_force
+                    + formation_force
+                    + consensus_force
+                    + road_force
+                    + obstacle_force
+                    + peer_force
+                    + behavior_force
+                    + leader_guidance_force
+                )
+                actions.append(
+                    self._force_to_action(
+                        state=state,
+                        force=total_force,
+                        target_speed=self._mode_adjusted_target_speed(
+                            self._reference_speed(observation, index, mode),
+                            mode,
+                        ),
+                    )
+                )
         return tuple(actions)

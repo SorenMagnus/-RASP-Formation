@@ -108,6 +108,44 @@ def build_nominal_force_history(
     )
 
 
+def build_decision_scalar_series(
+    snapshots: tuple[Snapshot, ...],
+    field_name: str,
+    *,
+    dtype: np.dtype | type = np.float64,
+) -> np.ndarray:
+    """Extract per-step decision diagnostics from snapshots."""
+
+    if not snapshots:
+        return np.zeros(0, dtype=dtype)
+    return np.asarray(
+        [getattr(snapshot.decision_diagnostics, field_name) for snapshot in snapshots],
+        dtype=dtype,
+    )
+
+
+def build_decision_theta_history(
+    snapshots: tuple[Snapshot, ...],
+    field_name: str,
+) -> np.ndarray:
+    """Extract per-step theta or theta-delta histories from snapshots."""
+
+    if not snapshots:
+        return np.zeros((0, 4), dtype=float)
+    return np.asarray(
+        [getattr(snapshot.decision_diagnostics, field_name) for snapshot in snapshots],
+        dtype=float,
+    )
+
+
+def build_decision_source_series(snapshots: tuple[Snapshot, ...]) -> np.ndarray:
+    """Extract per-step decision sources from snapshots."""
+
+    if not snapshots:
+        return np.zeros(0, dtype="<U16")
+    return np.asarray([snapshot.decision_diagnostics.source for snapshot in snapshots], dtype="<U16")
+
+
 def _state_and_obstacle_steps(
     initial_states: tuple[State, ...],
     initial_obstacles: tuple[ObstacleState, ...],
@@ -428,6 +466,10 @@ def compute_run_summary(
     mode_runtimes = build_step_scalar_series(snapshots, "mode_runtime")
     controller_runtimes = build_step_scalar_series(snapshots, "controller_runtime")
     safety_runtimes = build_step_scalar_series(snapshots, "safety_runtime")
+    decision_confidences = build_decision_scalar_series(snapshots, "confidence")
+    decision_theta_deltas = build_decision_theta_history(snapshots, "theta_delta")
+    decision_rl_fallbacks = build_decision_scalar_series(snapshots, "rl_fallback", dtype=np.bool_)
+    decision_theta_clipped = build_decision_scalar_series(snapshots, "theta_clipped", dtype=np.bool_)
     fallback_count = int(np.count_nonzero(safety_fallbacks)) if safety_fallbacks.size else 0
     if safety_fallbacks.size:
         total_action_count = int(safety_fallbacks.size)
@@ -498,6 +540,11 @@ def compute_run_summary(
     mean_safety_runtime_ms, max_safety_runtime_ms = _runtime_summary(safety_runtimes)
     qp_time_values = qp_solve_times[qp_solve_times > 0.0]
     qp_iteration_values = qp_iterations[qp_iterations > 0]
+    theta_delta_linf = (
+        np.max(np.abs(decision_theta_deltas), axis=1)
+        if decision_theta_deltas.size
+        else np.zeros(0, dtype=float)
+    )
 
     return {
         "num_steps": int(len(snapshots)),
@@ -536,6 +583,12 @@ def compute_run_summary(
         "fallback_count": fallback_count,
         "fallback_events": fallback_count,
         "fallback_ratio": float(fallback_count / total_action_count) if total_action_count else 0.0,
+        "rl_fallback_count": int(np.count_nonzero(decision_rl_fallbacks)) if decision_rl_fallbacks.size else 0,
+        "rl_confidence_mean": float(np.mean(decision_confidences)) if decision_confidences.size else 0.0,
+        "rl_confidence_min": float(np.min(decision_confidences)) if decision_confidences.size else 0.0,
+        "theta_delta_linf_mean": float(np.mean(theta_delta_linf)) if theta_delta_linf.size else 0.0,
+        "theta_delta_linf_max": float(np.max(theta_delta_linf)) if theta_delta_linf.size else 0.0,
+        "theta_clip_events": int(np.count_nonzero(decision_theta_clipped)) if decision_theta_clipped.size else 0,
         "mean_step_runtime_ms": mean_step_runtime_ms,
         "max_step_runtime_ms": max_step_runtime_ms,
         "mean_mode_runtime_ms": mean_mode_runtime_ms,

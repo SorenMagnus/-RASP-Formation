@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+DEFAULT_THETA_VECTOR: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.0)
+ZERO_THETA_VECTOR: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+THETA_LOWER_BOUNDS: tuple[float, float, float, float] = (0.70, 0.70, 0.50, 0.0)
+THETA_UPPER_BOUNDS: tuple[float, float, float, float] = (1.50, 1.50, 1.50, 0.60)
+THETA_RATE_LIMITS: tuple[float, float, float, float] = (0.08, 0.08, 0.06, 0.05)
+
 
 @dataclass(frozen=True)
 class InputBounds:
@@ -109,6 +115,29 @@ class SafetyConfig:
 
 
 @dataclass(frozen=True)
+class RLThetaConfig:
+    """Bounded and rate-limited stage-1 RL supervisor theta definition."""
+
+    lower: tuple[float, float, float, float] = THETA_LOWER_BOUNDS
+    upper: tuple[float, float, float, float] = THETA_UPPER_BOUNDS
+    rate_limit: tuple[float, float, float, float] = THETA_RATE_LIMITS
+    default: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR
+
+
+@dataclass(frozen=True)
+class RLDecisionConfig:
+    """Optional RL-supervisor settings attached to the decision layer."""
+
+    checkpoint_path: str = ""
+    deterministic_eval: bool = False
+    confidence_threshold: float = 0.55
+    ood_threshold: float = 6.0
+    observation_history: int = 5
+    interaction_limit: int = 8
+    theta: RLThetaConfig = field(default_factory=RLThetaConfig)
+
+
+@dataclass(frozen=True)
 class DecisionConfig:
     """模式决策配置。"""
 
@@ -126,6 +155,7 @@ class DecisionConfig:
     stagnation_progress_threshold: float
     stagnation_steps: int
     recover_exit_steps: int = 4
+    rl: RLDecisionConfig = field(default_factory=RLDecisionConfig)
 
 
 @dataclass(frozen=True)
@@ -320,6 +350,29 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class ModeDecision:
+    """Unified decision-layer output shared by FSM and RL supervisor modules."""
+
+    mode: str
+    theta: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR
+    source: str = "fsm"
+    confidence: float = 1.0
+
+
+@dataclass(frozen=True)
+class DecisionDiagnostics:
+    """Per-step decision diagnostics persisted for replay and RL evaluation."""
+
+    source: str = "fsm"
+    confidence: float = 1.0
+    theta: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR
+    theta_delta: tuple[float, float, float, float] = ZERO_THETA_VECTOR
+    rl_fallback: bool = False
+    theta_clipped: bool = False
+    normalized_obs_max_abs: float = 0.0
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """离散步结束后的快照。"""
 
@@ -340,3 +393,4 @@ class Snapshot:
     controller_runtime: float = 0.0
     safety_runtime: float = 0.0
     nominal_diagnostics: NominalDiagnostics = field(default_factory=NominalDiagnostics)
+    decision_diagnostics: DecisionDiagnostics = field(default_factory=DecisionDiagnostics)

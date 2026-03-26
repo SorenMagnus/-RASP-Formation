@@ -14,7 +14,15 @@ from apflf.decision.mode_base import (
     parse_mode_label,
 )
 from apflf.env.geometry import box_clearance, rotation_matrix
-from apflf.utils.types import DecisionConfig, Observation, ObstacleState, State
+from apflf.utils.types import (
+    DEFAULT_THETA_VECTOR,
+    DecisionConfig,
+    DecisionDiagnostics,
+    ModeDecision,
+    Observation,
+    ObstacleState,
+    State,
+)
 
 
 @dataclass(frozen=True)
@@ -53,18 +61,50 @@ class FSMModeDecision(ModeDecisionModule):
         self._leader_x_history: deque[float] = deque(maxlen=config.stagnation_steps + 1)
         self._locked_side: str | None = None
         self._hazard_memory_active = False
+        self._step_diagnostics = DecisionDiagnostics()
         # recover 退出迟滞计数器：recovery-complete 条件必须连续满足
         # N_exit 步才允许退出 recover 模式，防止 seed1 类场景过早退出
         self._recover_exit_count: int = 0
 
-    def select_mode(self, observation: Observation) -> str:
+    def reset(self, seed: int | None = None) -> None:
+        del seed
+        self._current_mode = self._default_mode
+        self._pending_mode = self._default_mode
+        self._pending_count = 0
+        self._leader_x_history = deque(maxlen=self.config.stagnation_steps + 1)
+        self._locked_side = None
+        self._hazard_memory_active = False
+        self._recover_exit_count = 0
+        self._step_diagnostics = DecisionDiagnostics()
+
+    def default_theta(self) -> tuple[float, float, float, float]:
+        return DEFAULT_THETA_VECTOR
+
+    def consume_step_diagnostics(self) -> DecisionDiagnostics:
+        diagnostics = self._step_diagnostics
+        self._step_diagnostics = DecisionDiagnostics()
+        return diagnostics
+
+    def select(self, observation: Observation, step: int) -> ModeDecision:
         """Select a discrete topology/behavior/gain mode."""
 
+        del step
         leader = observation.states[0]
         self._leader_x_history.append(leader.x)
         hazard = self._assess_hazard(observation)
         candidate_mode = self._candidate_mode(observation=observation, hazard=hazard)
-        return self._apply_hysteresis(candidate_mode)
+        mode = self._apply_hysteresis(candidate_mode)
+        self._step_diagnostics = DecisionDiagnostics(
+            source="fsm",
+            confidence=1.0,
+            theta=self.default_theta(),
+        )
+        return ModeDecision(
+            mode=mode,
+            theta=self.default_theta(),
+            source="fsm",
+            confidence=1.0,
+        )
 
     def _candidate_mode(self, *, observation: Observation, hazard: HazardAssessment) -> str:
         current_mode = parse_mode_label(self._current_mode)

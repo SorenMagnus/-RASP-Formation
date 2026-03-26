@@ -17,11 +17,19 @@ class APFController(BaseNominalController):
         - 输出项: 通过虚拟力映射得到连续控制输入 `u_nom`。
     """
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """输出经典 APF 名义控制。"""
 
         actions: list[Action] = []
         repulsive_scale, road_scale, _ = self._mode_gain_scales(mode)
+        theta_repulsive_scale, theta_road_scale, _, _ = self._theta_gain_scales(theta)
+        repulsive_scale *= theta_repulsive_scale
+        road_scale *= theta_road_scale
         for index, state in enumerate(observation.states):
             target = self._static_goal_target(observation, index, mode)
             attractive_force = self._attractive_force(state, target)

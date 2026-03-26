@@ -19,6 +19,8 @@ from apflf.utils.types import (
     ObstacleConfig,
     ProjectConfig,
     RoadConfig,
+    RLDecisionConfig,
+    RLThetaConfig,
     SafetyConfig,
     ScenarioConfig,
     SimulationConfig,
@@ -33,7 +35,7 @@ SUPPORTED_CONTROLLER_KINDS = {
     "dwa",
     "orca",
 }
-SUPPORTED_DECISION_KINDS = {"static", "fsm"}
+SUPPORTED_DECISION_KINDS = {"static", "fsm", "rl"}
 SUPPORTED_OBSTACLE_MODELS = {"static", "constant_velocity"}
 SUPPORTED_SAFETY_SOLVERS = {"osqp"}
 
@@ -418,6 +420,68 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
     if risk_threshold_exit > risk_threshold_enter:
         raise ValueError("`decision.risk_threshold_exit` must not exceed `decision.risk_threshold_enter`.")
 
+    rl_raw = _require_mapping(raw.get("rl", {}), "decision.rl")
+    theta_raw = _require_mapping(rl_raw.get("theta", {}), "decision.rl.theta")
+
+    def _load_theta_tuple(
+        mapping: dict[str, Any],
+        key: str,
+        default: tuple[float, float, float, float],
+        *,
+        non_negative: bool = True,
+    ) -> tuple[float, float, float, float]:
+        values = mapping.get(key, default)
+        if not isinstance(values, (list, tuple)) or len(values) != 4:
+            raise ValueError(f"`decision.rl.theta.{key}` must be a length-4 sequence.")
+        parsed = tuple(float(value) for value in values)
+        for index, value in enumerate(parsed):
+            if not math.isfinite(value):
+                raise ValueError(f"`decision.rl.theta.{key}[{index}]` must be finite.")
+            if non_negative and value < 0.0:
+                raise ValueError(f"`decision.rl.theta.{key}[{index}]` must be non-negative.")
+        return parsed
+
+    theta_lower = _load_theta_tuple(theta_raw, "lower", (0.70, 0.70, 0.50, 0.0))
+    theta_upper = _load_theta_tuple(theta_raw, "upper", (1.50, 1.50, 1.50, 0.60))
+    theta_rate_limit = _load_theta_tuple(theta_raw, "rate_limit", (0.08, 0.08, 0.06, 0.05))
+    theta_default = _load_theta_tuple(theta_raw, "default", (1.0, 1.0, 1.0, 0.0))
+    for index, (lower, upper, default_value) in enumerate(
+        zip(theta_lower, theta_upper, theta_default, strict=True)
+    ):
+        if lower > upper:
+            raise ValueError(f"`decision.rl.theta.lower[{index}]` must not exceed upper.")
+        if default_value < lower or default_value > upper:
+            raise ValueError(f"`decision.rl.theta.default[{index}]` must lie within bounds.")
+
+    rl_config = RLDecisionConfig(
+        checkpoint_path=str(rl_raw.get("checkpoint_path", "")),
+        deterministic_eval=bool(rl_raw.get("deterministic_eval", False)),
+        confidence_threshold=float(rl_raw.get("confidence_threshold", 0.55)),
+        ood_threshold=float(rl_raw.get("ood_threshold", 6.0)),
+        observation_history=int(
+            _require_positive(
+                float(rl_raw.get("observation_history", 5)),
+                "decision.rl.observation_history",
+            )
+        ),
+        interaction_limit=int(
+            _require_positive(
+                float(rl_raw.get("interaction_limit", 8)),
+                "decision.rl.interaction_limit",
+            )
+        ),
+        theta=RLThetaConfig(
+            lower=theta_lower,
+            upper=theta_upper,
+            rate_limit=theta_rate_limit,
+            default=theta_default,
+        ),
+    )
+    if not 0.0 <= rl_config.confidence_threshold <= 1.0:
+        raise ValueError("`decision.rl.confidence_threshold` must lie in [0, 1].")
+    if rl_config.ood_threshold < 0.0 or not math.isfinite(rl_config.ood_threshold):
+        raise ValueError("`decision.rl.ood_threshold` must be finite and non-negative.")
+
     return DecisionConfig(
         kind=kind,
         default_mode=str(raw.get("default_mode", "topology=line|behavior=follow|gain=nominal")),
@@ -464,6 +528,7 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
                 "decision.recover_exit_steps",
             )
         ),
+        rl=rl_config,
     )
 
 

@@ -66,10 +66,15 @@ class World:
         step_start = perf_counter()
         observation = self.build_observation()
         mode_start = perf_counter()
-        mode = self.mode_decision.select_mode(observation)
+        decision = self.mode_decision.select(observation, self._step_index)
         mode_runtime = perf_counter() - mode_start
+        decision_diagnostics = self.mode_decision.consume_step_diagnostics()
         controller_start = perf_counter()
-        nominal_actions = self.controller.compute_actions(observation=observation, mode=mode)
+        nominal_actions = self.controller.compute_actions(
+            observation=observation,
+            mode=decision.mode,
+            theta=decision.theta,
+        )
         controller_runtime = perf_counter() - controller_start
         nominal_diagnostics = self.controller.consume_step_diagnostics()
         safety_start = perf_counter()
@@ -78,6 +83,11 @@ class World:
             observation=observation,
         )
         safety_runtime = perf_counter() - safety_start
+        self.mode_decision.observe_feedback(
+            safety_corrections=safety_result.correction_norms,
+            safety_slacks=safety_result.slack_values,
+            safety_fallbacks=safety_result.fallback_flags,
+        )
         next_states = tuple(
             self.dynamics.step(state=state, action=action, dt=self.dt)
             for state, action in zip(self._states, safety_result.safe_actions, strict=True)
@@ -88,7 +98,7 @@ class World:
         snapshot = Snapshot(
             step_index=self._step_index,
             time=self._time,
-            mode=mode,
+            mode=decision.mode,
             states=next_states,
             nominal_actions=nominal_actions,
             safe_actions=safety_result.safe_actions,
@@ -103,6 +113,7 @@ class World:
             controller_runtime=controller_runtime,
             safety_runtime=safety_runtime,
             nominal_diagnostics=nominal_diagnostics,
+            decision_diagnostics=decision_diagnostics,
         )
         self._states = next_states
         self._snapshots.append(snapshot)

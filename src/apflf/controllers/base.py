@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -25,7 +26,12 @@ class Controller(ABC):
     """名义控制器抽象接口。"""
 
     @abstractmethod
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """根据观测与离散模式输出名义控制。"""
 
     def consume_step_diagnostics(self) -> NominalDiagnostics:
@@ -56,8 +62,14 @@ class BaseNominalController(Controller):
         self.road = road
         self.target_speed = target_speed
         self._step_diagnostics = NominalDiagnostics()
+        self._active_theta: tuple[float, float, float, float] | None = None
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """默认不实现，留给子类覆写。"""
 
         raise NotImplementedError
@@ -73,6 +85,37 @@ class BaseNominalController(Controller):
         """Cache step diagnostics for the world loop to persist."""
 
         self._step_diagnostics = diagnostics
+
+    def _normalize_theta(
+        self,
+        theta: tuple[float, float, float, float] | None,
+    ) -> tuple[float, float, float, float] | None:
+        if theta is None:
+            return None
+        if len(theta) != 4:
+            raise ValueError("Controller theta must be a length-4 tuple.")
+        return tuple(float(value) for value in theta)
+
+    @contextmanager
+    def _theta_context(self, theta: tuple[float, float, float, float] | None):
+        previous_theta = self._active_theta
+        self._active_theta = self._normalize_theta(theta)
+        try:
+            yield self._active_theta
+        finally:
+            self._active_theta = previous_theta
+
+    def _theta_gain_scales(
+        self,
+        theta: tuple[float, float, float, float] | None,
+    ) -> tuple[float, float, float, float]:
+        normalized_theta = self._normalize_theta(theta)
+        if normalized_theta is None:
+            return (1.0, 1.0, 1.0, 0.0)
+        return normalized_theta
+
+    def _active_theta_gain_scales(self) -> tuple[float, float, float, float]:
+        return self._theta_gain_scales(self._active_theta)
 
     def _static_goal_target(self, observation: Observation, index: int, mode: str) -> np.ndarray:
         """返回静态终点编队参考点。"""
@@ -485,10 +528,15 @@ class FormationCruiseController(BaseNominalController):
         该实现保留为兼容基线，便于与 Phase C 控制器族对照验证。
     """
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """输出所有车辆的最小巡航控制。"""
 
-        del mode
+        del mode, theta
 
         leader = observation.states[0]
         leader_target_speed = self._braking_speed(leader.x, observation.goal_x)

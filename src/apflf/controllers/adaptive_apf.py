@@ -129,6 +129,11 @@ class AdaptiveAPFController(APFLFController):
 
         return (float(force[0]), float(force[1]))
 
+    def _theta_governor_release_bias(self) -> float:
+        """Return the active leader governor-release floor bias, if any."""
+
+        return self._active_theta_gain_scales()[3]
+
     def _rising_activation(
         self,
         value: float,
@@ -625,7 +630,14 @@ class AdaptiveAPFController(APFLFController):
         if hold_activation <= 1e-6:
             return float(staggered_cap)
 
-        release_floor = float(np.clip(0.85 + 0.35 * hold_activation, 0.85, 1.20))
+        release_bias = self._theta_governor_release_bias()
+        release_floor = float(
+            np.clip(
+                0.85 + 0.35 * hold_activation + release_bias,
+                0.85,
+                1.20 + release_bias,
+            )
+        )
         released_cap = min(base_target_speed, max(staggered_cap, release_floor))
         return float(released_cap)
 
@@ -654,7 +666,14 @@ class AdaptiveAPFController(APFLFController):
         if hold_activation <= 1e-6:
             return (float(staggered_cap), 0.0)
 
-        release_floor = float(np.clip(0.85 + 0.35 * hold_activation, 0.85, 1.20))
+        release_bias = self._theta_governor_release_bias()
+        release_floor = float(
+            np.clip(
+                0.85 + 0.35 * hold_activation + release_bias,
+                0.85,
+                1.20 + release_bias,
+            )
+        )
         released_cap = min(base_target_speed, max(staggered_cap, release_floor))
         return (float(released_cap), float(hold_activation))
 
@@ -764,11 +783,12 @@ class AdaptiveAPFController(APFLFController):
         max_brake = max(abs(self.bounds.accel_min), 1e-6)
         staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
         blend = float(np.clip(a_staggered * 8.0, 0.0, 0.80))
+        release_bias = self._theta_governor_release_bias()
         crawl_floor = float(
             np.clip(
-                0.30 + 0.25 * max(state.speed - 0.35, 0.0),
+                0.30 + 0.25 * max(state.speed - 0.35, 0.0) + release_bias,
                 0.30,
-                0.70,
+                0.70 + release_bias,
             )
         )
         staggered_cap = max(
@@ -1011,12 +1031,18 @@ class AdaptiveAPFController(APFLFController):
             speed_floor, speed_ceiling = speed_ceiling, speed_floor
         return float(np.clip(scaled_target_speed, speed_floor, speed_ceiling))
 
-    def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
+    def compute_actions(
+        self,
+        observation: Observation,
+        mode: str,
+        theta: tuple[float, float, float, float] | None = None,
+    ) -> tuple[Action, ...]:
         """输出风险自适应 APF-LF 名义控制。"""
 
         actions: list[Action] = []
         leader_diagnostics = NominalDiagnostics()
         mode_repulsive_scale, mode_road_scale, _ = self._mode_gain_scales(mode)
+        theta_repulsive_scale, theta_road_scale, theta_formation_scale, _ = self._theta_gain_scales(theta)
         leader_goal_error = max(observation.goal_x - observation.states[0].x, 0.0)
         if self._leader_goal_errors:
             progress_delta = self._leader_goal_errors[-1] - leader_goal_error
@@ -1039,120 +1065,121 @@ class AdaptiveAPFController(APFLFController):
         cached_speeds: list[float] = []
         cached_steer_biases: list[float] = []
         leader_force_breakdown = NominalForceBreakdown()
-        for index, state in enumerate(observation.states):
-            clearance, closing_speed, ttc, boundary_margin = self._risk_features(observation, state)
-            risk_score = self.compute_risk_score(
-                clearance=clearance,
-                closing_speed=closing_speed,
-                ttc=ttc,
-                boundary_margin=boundary_margin,
-            )
-            repulsive_gain, road_gain = self.schedule_gains(risk_score)
-            repulsive_gain *= mode_repulsive_scale
-            road_gain *= mode_road_scale
-            if index == 0:
-                target = self._leader_goal_target(observation, state, mode)
-                leader_guidance_force = self._leader_bypass_force(
-                    observation,
-                    state,
-                    mode,
-                    target_y=float(target[1]),
-                    road_gain=road_gain,
+        with self._theta_context(theta):
+            for index, state in enumerate(observation.states):
+                clearance, closing_speed, ttc, boundary_margin = self._risk_features(observation, state)
+                risk_score = self.compute_risk_score(
+                    clearance=clearance,
+                    closing_speed=closing_speed,
+                    ttc=ttc,
+                    boundary_margin=boundary_margin,
                 )
-                staggered_boost = self._leader_staggered_lateral_boost(
+                repulsive_gain, road_gain = self.schedule_gains(risk_score)
+                repulsive_gain *= mode_repulsive_scale * theta_repulsive_scale
+                road_gain *= mode_road_scale * theta_road_scale
+                if index == 0:
+                    target = self._leader_goal_target(observation, state, mode)
+                    leader_guidance_force = self._leader_bypass_force(
+                        observation,
+                        state,
+                        mode,
+                        target_y=float(target[1]),
+                        road_gain=road_gain,
+                    )
+                    staggered_boost = self._leader_staggered_lateral_boost(
+                        observation=observation,
+                        state=state,
+                        mode=mode,
+                    )
+                    leader_steer_bias = self._leader_staggered_steer_bias(
+                        state=state,
+                        target_y=float(target[1]),
+                        boost=staggered_boost,
+                    )
+                    if staggered_boost > 1.0:
+                        leader_guidance_force = leader_guidance_force * staggered_boost
+                else:
+                    target = self._desired_global_position(observation, index, mode)
+                    leader_guidance_force = np.zeros(2, dtype=float)
+                    leader_steer_bias = 0.0
+                attractive_force = self._attractive_force(state, target)
+                formation_force = self._formation_force(observation, index, mode) * theta_formation_scale
+                consensus_force = self._consensus_force(observation, index, mode) * theta_formation_scale
+                road_force = self._road_force(state, road_gain=road_gain)
+                obstacle_force = self._adaptive_obstacle_force(
                     observation=observation,
-                    state=state,
+                    index=index,
                     mode=mode,
+                    repulsive_gain=repulsive_gain,
                 )
-                leader_steer_bias = self._leader_staggered_steer_bias(
-                    state=state,
-                    target_y=float(target[1]),
-                    boost=staggered_boost,
-                )
-                if staggered_boost > 1.0:
-                    leader_guidance_force = leader_guidance_force * staggered_boost
-            else:
-                target = self._desired_global_position(observation, index, mode)
-                leader_guidance_force = np.zeros(2, dtype=float)
-                leader_steer_bias = 0.0
-            attractive_force = self._attractive_force(state, target)
-            formation_force = self._formation_force(observation, index, mode)
-            consensus_force = self._consensus_force(observation, index, mode)
-            road_force = self._road_force(state, road_gain=road_gain)
-            obstacle_force = self._adaptive_obstacle_force(
-                observation=observation,
-                index=index,
-                mode=mode,
-                repulsive_gain=repulsive_gain,
-            )
-            peer_force = self._sum_peer_forces(
-                observation=observation,
-                index=index,
-                repulsive_gain=repulsive_gain,
-            )
-            behavior_force = self._mode_behavior_force(mode=mode, road_gain=road_gain, index=index)
-            total_force = (
-                attractive_force
-                + formation_force
-                + consensus_force
-                + road_force
-                + obstacle_force
-                + peer_force
-                + behavior_force
-                + leader_guidance_force
-            )
-            if index == 0:
-                (
-                    leader_base_reference_speed,
-                    leader_hazard_speed_cap,
-                    leader_staggered_speed_cap,
-                    leader_release_speed_cap,
-                    leader_staggered_activation,
-                    leader_edge_hold_activation,
-                ) = self._leader_reference_speed_trace(
+                peer_force = self._sum_peer_forces(
                     observation=observation,
-                    state=state,
-                    mode=mode,
+                    index=index,
+                    repulsive_gain=repulsive_gain,
                 )
-                reference_speed = leader_release_speed_cap
-            else:
-                reference_speed = super()._reference_speed(observation, index, mode)
-            target_speed = self._mode_adjusted_target_speed(reference_speed, mode)
-            if index == 0:
-                target_speed = self._leader_low_speed_braking_cap(
-                    observation=observation,
-                    state=state,
-                    mode=mode,
-                    target_y=float(target[1]),
-                    total_force=total_force,
-                    scaled_target_speed=target_speed,
+                behavior_force = self._mode_behavior_force(mode=mode, road_gain=road_gain, index=index)
+                total_force = (
+                    attractive_force
+                    + formation_force
+                    + consensus_force
+                    + road_force
+                    + obstacle_force
+                    + peer_force
+                    + behavior_force
+                    + leader_guidance_force
                 )
-                leader_diagnostics = NominalDiagnostics(
-                    leader_risk_score=float(risk_score),
-                    leader_base_reference_speed=float(leader_base_reference_speed),
-                    leader_hazard_speed_cap=float(leader_hazard_speed_cap),
-                    leader_staggered_speed_cap=float(leader_staggered_speed_cap),
-                    leader_release_speed_cap=float(leader_release_speed_cap),
-                    leader_target_speed=float(target_speed),
-                    leader_staggered_activation=float(leader_staggered_activation),
-                    leader_edge_hold_activation=float(leader_edge_hold_activation),
-                )
-                leader_force_breakdown = NominalForceBreakdown(
-                    attractive=self._force_tuple(attractive_force),
-                    formation=self._force_tuple(formation_force),
-                    consensus=self._force_tuple(consensus_force),
-                    road=self._force_tuple(road_force),
-                    obstacle=self._force_tuple(obstacle_force),
-                    peer=self._force_tuple(peer_force),
-                    behavior=self._force_tuple(behavior_force),
-                    guidance=self._force_tuple(leader_guidance_force),
-                    total=self._force_tuple(total_force),
-                )
-            cached_forces.append(total_force)
-            cached_speeds.append(target_speed)
-            cached_steer_biases.append(leader_steer_bias if index == 0 else 0.0)
-            if index == 0:
-                leader_force_norm = float(np.linalg.norm(total_force))
+                if index == 0:
+                    (
+                        leader_base_reference_speed,
+                        leader_hazard_speed_cap,
+                        leader_staggered_speed_cap,
+                        leader_release_speed_cap,
+                        leader_staggered_activation,
+                        leader_edge_hold_activation,
+                    ) = self._leader_reference_speed_trace(
+                        observation=observation,
+                        state=state,
+                        mode=mode,
+                    )
+                    reference_speed = leader_release_speed_cap
+                else:
+                    reference_speed = super()._reference_speed(observation, index, mode)
+                target_speed = self._mode_adjusted_target_speed(reference_speed, mode)
+                if index == 0:
+                    target_speed = self._leader_low_speed_braking_cap(
+                        observation=observation,
+                        state=state,
+                        mode=mode,
+                        target_y=float(target[1]),
+                        total_force=total_force,
+                        scaled_target_speed=target_speed,
+                    )
+                    leader_diagnostics = NominalDiagnostics(
+                        leader_risk_score=float(risk_score),
+                        leader_base_reference_speed=float(leader_base_reference_speed),
+                        leader_hazard_speed_cap=float(leader_hazard_speed_cap),
+                        leader_staggered_speed_cap=float(leader_staggered_speed_cap),
+                        leader_release_speed_cap=float(leader_release_speed_cap),
+                        leader_target_speed=float(target_speed),
+                        leader_staggered_activation=float(leader_staggered_activation),
+                        leader_edge_hold_activation=float(leader_edge_hold_activation),
+                    )
+                    leader_force_breakdown = NominalForceBreakdown(
+                        attractive=self._force_tuple(attractive_force),
+                        formation=self._force_tuple(formation_force),
+                        consensus=self._force_tuple(consensus_force),
+                        road=self._force_tuple(road_force),
+                        obstacle=self._force_tuple(obstacle_force),
+                        peer=self._force_tuple(peer_force),
+                        behavior=self._force_tuple(behavior_force),
+                        guidance=self._force_tuple(leader_guidance_force),
+                        total=self._force_tuple(total_force),
+                    )
+                cached_forces.append(total_force)
+                cached_speeds.append(target_speed)
+                cached_steer_biases.append(leader_steer_bias if index == 0 else 0.0)
+                if index == 0:
+                    leader_force_norm = float(np.linalg.norm(total_force))
 
         leader_escape_force = np.zeros(2, dtype=float)
         if self.update_stagnation(
