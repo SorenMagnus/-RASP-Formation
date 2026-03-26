@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps-per-rollout", type=int, default=512)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--resume-from", default="", help="Optional rollout-boundary checkpoint to resume from.")
     parser.add_argument("--output", required=True, help="Checkpoint output path.")
     return parser
 
@@ -53,11 +54,18 @@ def main() -> int:
         ),
         device=args.device,
     )
-    logs = trainer.train(seed=args.seed)
-    trainer.save_checkpoint(Path(args.output))
+    output_path = Path(args.output)
+    latest_path = output_path.with_name("latest.pt")
+    resume_from = Path(args.resume_from) if args.resume_from else None
+    logs = trainer.train(
+        seed=args.seed,
+        periodic_checkpoint_path=latest_path,
+        resume_from=resume_from,
+    )
+    trainer.save_checkpoint(output_path)
     if logs:
         print(logs[-1])
-    print(Path(args.output).resolve())
+    print(output_path.resolve())
     return 0
 
 
