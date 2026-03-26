@@ -10,7 +10,14 @@ import numpy as np
 from apflf.controllers.apf_lf import APFLFController
 from apflf.controllers.apf_st import spatio_temporal_factor
 from apflf.decision.mode_base import parse_mode_label
-from apflf.utils.types import Action, Observation, ObstacleState, State
+from apflf.utils.types import (
+    Action,
+    NominalDiagnostics,
+    NominalForceBreakdown,
+    Observation,
+    ObstacleState,
+    State,
+)
 
 
 class AdaptiveAPFController(APFLFController):
@@ -116,6 +123,11 @@ class AdaptiveAPFController(APFLFController):
 
         clamped = float(np.clip(value, 0.0, 1.0))
         return float(clamped * clamped * (3.0 - 2.0 * clamped))
+
+    def _force_tuple(self, force: np.ndarray) -> tuple[float, float]:
+        """Convert a force vector into a stable tuple for logging/replay."""
+
+        return (float(force[0]), float(force[1]))
 
     def _rising_activation(
         self,
@@ -581,6 +593,238 @@ class AdaptiveAPFController(APFLFController):
             hazard_speed_cap = max(0.60, hazard_speed_cap * (1.0 - 0.25 * staggered_activation))
         return float(min(base_target_speed, hazard_speed_cap))
 
+    def _leader_relocked_edge_speed_release(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        front_obstacles: tuple[ObstacleState, ...],
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+        base_target_speed: float,
+        staggered_cap: float,
+    ) -> float:
+        """Release the staggered speed cap once relocked edge-hold geometry is established.
+
+        Keeps the logic leader-only, smooth, and bounded:
+
+        * exact degradation to ``staggered_cap`` when edge-hold activation is zero
+        * monotone release floor in a small crawl-speed interval
+        * hard upper bound at ``base_target_speed``
+        """
+
+        hold_activation = self._leader_relocked_edge_hold_activation(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+        )
+        if hold_activation <= 1e-6:
+            return float(staggered_cap)
+
+        release_floor = float(np.clip(0.85 + 0.35 * hold_activation, 0.85, 1.20))
+        released_cap = min(base_target_speed, max(staggered_cap, release_floor))
+        return float(released_cap)
+
+    def _leader_relocked_edge_speed_release_trace(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        front_obstacles: tuple[ObstacleState, ...],
+        relevant_obstacles: tuple[ObstacleState, ...],
+        side_sign: float,
+        base_target_speed: float,
+        staggered_cap: float,
+    ) -> tuple[float, float]:
+        """Return released cap and edge-hold activation for leader-only diagnostics."""
+
+        hold_activation = self._leader_relocked_edge_hold_activation(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=relevant_obstacles,
+            side_sign=side_sign,
+        )
+        if hold_activation <= 1e-6:
+            return (float(staggered_cap), 0.0)
+
+        release_floor = float(np.clip(0.85 + 0.35 * hold_activation, 0.85, 1.20))
+        released_cap = min(base_target_speed, max(staggered_cap, release_floor))
+        return (float(released_cap), float(hold_activation))
+
+    def _leader_staggered_speed_trace(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+        base_target_speed: float,
+    ) -> tuple[float, float, float, float]:
+        """Return released cap, pre-release cap, staggered activation, and edge-hold activation."""
+
+        parsed_mode = parse_mode_label(mode)
+        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        front_obstacles = self._leader_front_obstacles(observation, state)
+        if not front_obstacles:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        side_sign = self._leader_behavior_side_sign(
+            observation,
+            state,
+            mode,
+            front_obstacles=front_obstacles,
+        )
+        if side_sign is None:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        nominal_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=side_sign,
+        )
+        if not nominal_relevant:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        alternate_relevant = self._leader_relevant_obstacles(
+            observation,
+            front_obstacles=front_obstacles,
+            side_sign=-side_sign,
+        )
+        if not alternate_relevant:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        target_y = self._leader_behavior_target_y(observation, state, mode)
+        if target_y is None or state.speed <= 0.35:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        lateral_error = abs(float(target_y - state.y))
+        lateral_dead_zone = 0.25 * self.config.vehicle_width
+        if lateral_error <= lateral_dead_zone:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        state_front_x = state.x + 0.5 * self.config.vehicle_length
+        nominal_rear_gap = min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in nominal_relevant
+        )
+        engage_distance = max(
+            0.25 * self.config.obstacle_influence_distance,
+            1.0 * self.config.vehicle_length,
+        )
+        a_nominal_gap = float(
+            np.clip(
+                (engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+
+        alternate_rear_gap = min(
+            obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in alternate_relevant
+        )
+        alternate_lookahead = max(
+            0.5 * self.config.obstacle_influence_distance,
+            1.5 * self.config.vehicle_length,
+        )
+        if alternate_rear_gap < -0.5 * self.config.vehicle_length:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+        if alternate_rear_gap > alternate_lookahead:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+        a_alternate_gap = float(
+            np.clip(
+                (alternate_lookahead - alternate_rear_gap) / max(alternate_lookahead, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+
+        lateral_window = max(
+            1.5 * self.config.vehicle_width,
+            0.5 * observation.road.half_width,
+        )
+        a_lateral = float(
+            np.clip(
+                (lateral_error - lateral_dead_zone) / max(lateral_window - lateral_dead_zone, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        a_staggered = float(a_nominal_gap * a_alternate_gap * a_lateral)
+        if a_staggered <= 1e-6:
+            return (float(base_target_speed), float(base_target_speed), 0.0, 0.0)
+
+        min_gap = min(max(nominal_rear_gap, 0.0), max(alternate_rear_gap, 0.0))
+        max_brake = max(abs(self.bounds.accel_min), 1e-6)
+        staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
+        blend = float(np.clip(a_staggered * 8.0, 0.0, 0.80))
+        crawl_floor = float(
+            np.clip(
+                0.30 + 0.25 * max(state.speed - 0.35, 0.0),
+                0.30,
+                0.70,
+            )
+        )
+        staggered_cap = max(
+            crawl_floor,
+            (1.0 - blend) * base_target_speed + blend * staggered_gap_speed,
+        )
+        released_cap, hold_activation = self._leader_relocked_edge_speed_release_trace(
+            observation=observation,
+            state=state,
+            mode=mode,
+            front_obstacles=front_obstacles,
+            relevant_obstacles=nominal_relevant,
+            side_sign=side_sign,
+            base_target_speed=base_target_speed,
+            staggered_cap=staggered_cap,
+        )
+        return (
+            float(released_cap),
+            float(staggered_cap),
+            float(a_staggered),
+            float(hold_activation),
+        )
+
+    def _leader_reference_speed_trace(
+        self,
+        *,
+        observation: Observation,
+        state: State,
+        mode: str,
+    ) -> tuple[float, float, float, float, float, float]:
+        """Return the leader reference-speed chain for diagnostics and logging."""
+
+        base_reference_speed = super()._reference_speed(observation, 0, mode)
+        hazard_speed_cap = self._leader_hazard_speed_limit(
+            observation=observation,
+            state=state,
+            mode=mode,
+            base_target_speed=base_reference_speed,
+        )
+        release_speed_cap, staggered_speed_cap, staggered_activation, edge_hold_activation = (
+            self._leader_staggered_speed_trace(
+                observation=observation,
+                state=state,
+                mode=mode,
+                base_target_speed=hazard_speed_cap,
+            )
+        )
+        return (
+            float(base_reference_speed),
+            float(hazard_speed_cap),
+            float(staggered_speed_cap),
+            float(release_speed_cap),
+            float(staggered_activation),
+            float(edge_hold_activation),
+        )
+
     def _leader_staggered_hazard_speed_cap(
         self,
         *,
@@ -610,111 +854,13 @@ class AdaptiveAPFController(APFLFController):
         * does not affect follower reference speed
         """
 
-        parsed_mode = parse_mode_label(mode)
-        if parsed_mode.behavior == "follow" or parsed_mode.behavior.startswith("recover_"):
-            return base_target_speed
-
-        front_obstacles = self._leader_front_obstacles(observation, state)
-        if not front_obstacles:
-            return base_target_speed
-
-        side_sign = self._leader_behavior_side_sign(
-            observation, state, mode, front_obstacles=front_obstacles,
+        released_cap, _, _, _ = self._leader_staggered_speed_trace(
+            observation=observation,
+            state=state,
+            mode=mode,
+            base_target_speed=base_target_speed,
         )
-        if side_sign is None:
-            return base_target_speed
-
-        # --- nominal-side relevant obstacles ---
-        nominal_relevant = self._leader_relevant_obstacles(
-            observation, front_obstacles=front_obstacles, side_sign=side_sign,
-        )
-        if not nominal_relevant:
-            return base_target_speed
-
-        # --- alternate-side relevant obstacles (staggered detection) ---
-        alternate_relevant = self._leader_relevant_obstacles(
-            observation, front_obstacles=front_obstacles, side_sign=-side_sign,
-        )
-        if not alternate_relevant:
-            return base_target_speed
-
-        # --- lateral dead-zone: skip if reorientation is nearly complete ---
-        target_y = self._leader_behavior_target_y(observation, state, mode)
-        if target_y is None:
-            return base_target_speed
-        if state.speed <= 0.35:
-            return base_target_speed
-        lateral_error = abs(float(target_y - state.y))
-        lateral_dead_zone = 0.25 * self.config.vehicle_width
-        if lateral_error <= lateral_dead_zone:
-            return base_target_speed
-
-        # --- a_nominal_gap: how close is the nearest nominal blocker ---
-        state_front_x = state.x + 0.5 * self.config.vehicle_length
-        nominal_rear_gap = min(
-            obs.x - 0.5 * obs.length - state_front_x for obs in nominal_relevant
-        )
-        engage_distance = max(
-            0.25 * self.config.obstacle_influence_distance,
-            1.0 * self.config.vehicle_length,
-        )
-        a_nominal_gap = float(np.clip(
-            (engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6),
-            0.0, 1.0,
-        ))
-
-        # --- a_alternate_gap: alternate blocker within lookahead ---
-        alternate_rear_gap = min(
-            obs.x - 0.5 * obs.length - state_front_x for obs in alternate_relevant
-        )
-        alternate_lookahead = max(
-            0.5 * self.config.obstacle_influence_distance,
-            1.5 * self.config.vehicle_length,
-        )
-        if alternate_rear_gap < -0.5 * self.config.vehicle_length:
-            return base_target_speed
-        if alternate_rear_gap > alternate_lookahead:
-            return base_target_speed
-        a_alternate_gap = float(np.clip(
-            (alternate_lookahead - alternate_rear_gap) / max(alternate_lookahead, 1e-6),
-            0.0, 1.0,
-        ))
-
-        # --- a_lateral: lateral reorientation incompleteness ---
-        lateral_window = max(
-            1.5 * self.config.vehicle_width,
-            0.5 * observation.road.half_width,
-        )
-        a_lateral = float(np.clip(
-            (lateral_error - lateral_dead_zone) / max(lateral_window - lateral_dead_zone, 1e-6),
-            0.0, 1.0,
-        ))
-
-        # --- composite staggered activation ---
-        a_staggered = a_nominal_gap * a_alternate_gap * a_lateral
-        if a_staggered <= 1e-6:
-            return base_target_speed
-
-        # --- gap-speed blend: monotonically non-increasing, floor-bounded ---
-        min_gap = min(max(nominal_rear_gap, 0.0), max(alternate_rear_gap, 0.0))
-        max_brake = max(abs(self.bounds.accel_min), 1e-6)
-        staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
-        blend = float(np.clip(a_staggered * 8.0, 0.0, 0.80))
-        # Keep a small rolling floor while the leader is still carrying speed,
-        # so the staggered governor does not collapse straight to a hard crawl
-        # once longitudinal relief has already opened a feasible forward channel.
-        crawl_floor = float(
-            np.clip(
-                0.30 + 0.25 * max(state.speed - 0.35, 0.0),
-                0.30,
-                0.70,
-            )
-        )
-        staggered_cap = max(
-            crawl_floor,
-            (1.0 - blend) * base_target_speed + blend * staggered_gap_speed,
-        )
-        return float(min(base_target_speed, staggered_cap))
+        return float(released_cap)
 
     def _leader_staggered_lateral_boost(
         self,
@@ -824,21 +970,14 @@ class AdaptiveAPFController(APFLFController):
     def _reference_speed(self, observation: Observation, index: int, mode: str) -> float:
         """Construct reference speed with leader hazard-speed governor and staggered corridor governor."""
 
-        base_target_speed = super()._reference_speed(observation, index, mode)
         if index != 0:
-            return base_target_speed
-        hazard_limited = self._leader_hazard_speed_limit(
+            return super()._reference_speed(observation, index, mode)
+        _, _, _, release_speed_cap, _, _ = self._leader_reference_speed_trace(
             observation=observation,
             state=observation.states[index],
             mode=mode,
-            base_target_speed=base_target_speed,
         )
-        return self._leader_staggered_hazard_speed_cap(
-            observation=observation,
-            state=observation.states[index],
-            mode=mode,
-            base_target_speed=hazard_limited,
-        )
+        return release_speed_cap
 
     def _leader_low_speed_braking_cap(
         self,
@@ -876,6 +1015,7 @@ class AdaptiveAPFController(APFLFController):
         """输出风险自适应 APF-LF 名义控制。"""
 
         actions: list[Action] = []
+        leader_diagnostics = NominalDiagnostics()
         mode_repulsive_scale, mode_road_scale, _ = self._mode_gain_scales(mode)
         leader_goal_error = max(observation.goal_x - observation.states[0].x, 0.0)
         if self._leader_goal_errors:
@@ -898,6 +1038,7 @@ class AdaptiveAPFController(APFLFController):
         cached_forces: list[np.ndarray] = []
         cached_speeds: list[float] = []
         cached_steer_biases: list[float] = []
+        leader_force_breakdown = NominalForceBreakdown()
         for index, state in enumerate(observation.states):
             clearance, closing_speed, ttc, boundary_margin = self._risk_features(observation, state)
             risk_score = self.compute_risk_score(
@@ -960,10 +1101,23 @@ class AdaptiveAPFController(APFLFController):
                 + behavior_force
                 + leader_guidance_force
             )
-            target_speed = self._mode_adjusted_target_speed(
-                self._reference_speed(observation, index, mode),
-                mode,
-            )
+            if index == 0:
+                (
+                    leader_base_reference_speed,
+                    leader_hazard_speed_cap,
+                    leader_staggered_speed_cap,
+                    leader_release_speed_cap,
+                    leader_staggered_activation,
+                    leader_edge_hold_activation,
+                ) = self._leader_reference_speed_trace(
+                    observation=observation,
+                    state=state,
+                    mode=mode,
+                )
+                reference_speed = leader_release_speed_cap
+            else:
+                reference_speed = super()._reference_speed(observation, index, mode)
+            target_speed = self._mode_adjusted_target_speed(reference_speed, mode)
             if index == 0:
                 target_speed = self._leader_low_speed_braking_cap(
                     observation=observation,
@@ -973,20 +1127,70 @@ class AdaptiveAPFController(APFLFController):
                     total_force=total_force,
                     scaled_target_speed=target_speed,
                 )
+                leader_diagnostics = NominalDiagnostics(
+                    leader_risk_score=float(risk_score),
+                    leader_base_reference_speed=float(leader_base_reference_speed),
+                    leader_hazard_speed_cap=float(leader_hazard_speed_cap),
+                    leader_staggered_speed_cap=float(leader_staggered_speed_cap),
+                    leader_release_speed_cap=float(leader_release_speed_cap),
+                    leader_target_speed=float(target_speed),
+                    leader_staggered_activation=float(leader_staggered_activation),
+                    leader_edge_hold_activation=float(leader_edge_hold_activation),
+                )
+                leader_force_breakdown = NominalForceBreakdown(
+                    attractive=self._force_tuple(attractive_force),
+                    formation=self._force_tuple(formation_force),
+                    consensus=self._force_tuple(consensus_force),
+                    road=self._force_tuple(road_force),
+                    obstacle=self._force_tuple(obstacle_force),
+                    peer=self._force_tuple(peer_force),
+                    behavior=self._force_tuple(behavior_force),
+                    guidance=self._force_tuple(leader_guidance_force),
+                    total=self._force_tuple(total_force),
+                )
             cached_forces.append(total_force)
             cached_speeds.append(target_speed)
             cached_steer_biases.append(leader_steer_bias if index == 0 else 0.0)
             if index == 0:
                 leader_force_norm = float(np.linalg.norm(total_force))
 
+        leader_escape_force = np.zeros(2, dtype=float)
         if self.update_stagnation(
             progress_delta=progress_delta,
             speed=observation.states[0].speed,
             force_norm=leader_force_norm,
         ):
-            cached_forces[0] = cached_forces[0] + self._escape_force(observation.states[0], observation)
+            leader_escape_force = self._escape_force(observation.states[0], observation)
+            cached_forces[0] = cached_forces[0] + leader_escape_force
         elif self._escape_steps_remaining > 0:
-            cached_forces[0] = cached_forces[0] + self._escape_force(observation.states[0], observation)
+            leader_escape_force = self._escape_force(observation.states[0], observation)
+            cached_forces[0] = cached_forces[0] + leader_escape_force
+
+        if cached_forces:
+            self._record_step_diagnostics(
+                NominalDiagnostics(
+                    leader_risk_score=leader_diagnostics.leader_risk_score,
+                    leader_base_reference_speed=leader_diagnostics.leader_base_reference_speed,
+                    leader_hazard_speed_cap=leader_diagnostics.leader_hazard_speed_cap,
+                    leader_staggered_speed_cap=leader_diagnostics.leader_staggered_speed_cap,
+                    leader_release_speed_cap=leader_diagnostics.leader_release_speed_cap,
+                    leader_target_speed=leader_diagnostics.leader_target_speed,
+                    leader_staggered_activation=leader_diagnostics.leader_staggered_activation,
+                    leader_edge_hold_activation=leader_diagnostics.leader_edge_hold_activation,
+                    leader_force=NominalForceBreakdown(
+                        attractive=leader_force_breakdown.attractive,
+                        formation=leader_force_breakdown.formation,
+                        consensus=leader_force_breakdown.consensus,
+                        road=leader_force_breakdown.road,
+                        obstacle=leader_force_breakdown.obstacle,
+                        peer=leader_force_breakdown.peer,
+                        behavior=leader_force_breakdown.behavior,
+                        guidance=leader_force_breakdown.guidance,
+                        escape=self._force_tuple(leader_escape_force),
+                        total=self._force_tuple(cached_forces[0]),
+                    ),
+                )
+            )
 
         for state, force, target_speed, steer_bias in zip(
             observation.states,

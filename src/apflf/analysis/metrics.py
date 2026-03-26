@@ -78,6 +78,36 @@ def build_step_scalar_series(
     return np.asarray([getattr(snapshot, field_name) for snapshot in snapshots], dtype=dtype)
 
 
+def build_nominal_scalar_series(
+    snapshots: tuple[Snapshot, ...],
+    field_name: str,
+    *,
+    dtype: np.dtype | type = np.float64,
+) -> np.ndarray:
+    """Extract leader nominal-diagnostic scalar histories from snapshots."""
+
+    if not snapshots:
+        return np.zeros(0, dtype=dtype)
+    return np.asarray(
+        [getattr(snapshot.nominal_diagnostics, field_name) for snapshot in snapshots],
+        dtype=dtype,
+    )
+
+
+def build_nominal_force_history(
+    snapshots: tuple[Snapshot, ...],
+    field_name: str,
+) -> np.ndarray:
+    """Extract leader nominal-force vector histories from snapshots."""
+
+    if not snapshots:
+        return np.zeros((0, 2), dtype=float)
+    return np.asarray(
+        [getattr(snapshot.nominal_diagnostics.leader_force, field_name) for snapshot in snapshots],
+        dtype=float,
+    )
+
+
 def _state_and_obstacle_steps(
     initial_states: tuple[State, ...],
     initial_obstacles: tuple[ObstacleState, ...],

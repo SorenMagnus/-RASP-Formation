@@ -10,7 +10,15 @@ import numpy as np
 from apflf.decision.mode_base import parse_mode_label
 from apflf.env.geometry import box_clearance, normalize_angle, rotation_matrix
 from apflf.env.road import Road
-from apflf.utils.types import Action, ControllerConfig, InputBounds, Observation, ObstacleState, State
+from apflf.utils.types import (
+    Action,
+    ControllerConfig,
+    InputBounds,
+    NominalDiagnostics,
+    Observation,
+    ObstacleState,
+    State,
+)
 
 
 class Controller(ABC):
@@ -19,6 +27,11 @@ class Controller(ABC):
     @abstractmethod
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """根据观测与离散模式输出名义控制。"""
+
+    def consume_step_diagnostics(self) -> NominalDiagnostics:
+        """Return the latest controller diagnostics, if any."""
+
+        return NominalDiagnostics()
 
 
 class BaseNominalController(Controller):
@@ -42,11 +55,24 @@ class BaseNominalController(Controller):
         self.bounds = bounds
         self.road = road
         self.target_speed = target_speed
+        self._step_diagnostics = NominalDiagnostics()
 
     def compute_actions(self, observation: Observation, mode: str) -> tuple[Action, ...]:
         """默认不实现，留给子类覆写。"""
 
         raise NotImplementedError
+
+    def consume_step_diagnostics(self) -> NominalDiagnostics:
+        """Return the latest diagnostics and reset the cache for the next step."""
+
+        diagnostics = self._step_diagnostics
+        self._step_diagnostics = NominalDiagnostics()
+        return diagnostics
+
+    def _record_step_diagnostics(self, diagnostics: NominalDiagnostics) -> None:
+        """Cache step diagnostics for the world loop to persist."""
+
+        self._step_diagnostics = diagnostics
 
     def _static_goal_target(self, observation: Observation, index: int, mode: str) -> np.ndarray:
         """返回静态终点编队参考点。"""

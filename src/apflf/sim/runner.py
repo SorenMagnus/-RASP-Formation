@@ -12,6 +12,8 @@ import yaml
 from apflf.analysis.metrics import (
     build_action_history,
     build_obstacle_history,
+    build_nominal_force_history,
+    build_nominal_scalar_series,
     build_scalar_history,
     build_state_history,
     compute_run_summary,
@@ -89,6 +91,24 @@ def _write_run_artifact(
     safety_fallbacks = build_scalar_history(snapshots, "safety_fallbacks", dtype=np.bool_)
     qp_solve_times = build_scalar_history(snapshots, "qp_solve_times")
     qp_iterations = build_scalar_history(snapshots, "qp_iterations", dtype=np.int64)
+    leader_risk_scores = build_nominal_scalar_series(snapshots, "leader_risk_score")
+    leader_base_reference_speeds = build_nominal_scalar_series(snapshots, "leader_base_reference_speed")
+    leader_hazard_speed_caps = build_nominal_scalar_series(snapshots, "leader_hazard_speed_cap")
+    leader_staggered_speed_caps = build_nominal_scalar_series(snapshots, "leader_staggered_speed_cap")
+    leader_release_speed_caps = build_nominal_scalar_series(snapshots, "leader_release_speed_cap")
+    leader_target_speeds = build_nominal_scalar_series(snapshots, "leader_target_speed")
+    leader_staggered_activations = build_nominal_scalar_series(snapshots, "leader_staggered_activation")
+    leader_edge_hold_activations = build_nominal_scalar_series(snapshots, "leader_edge_hold_activation")
+    leader_force_attractive = build_nominal_force_history(snapshots, "attractive")
+    leader_force_formation = build_nominal_force_history(snapshots, "formation")
+    leader_force_consensus = build_nominal_force_history(snapshots, "consensus")
+    leader_force_road = build_nominal_force_history(snapshots, "road")
+    leader_force_obstacle = build_nominal_force_history(snapshots, "obstacle")
+    leader_force_peer = build_nominal_force_history(snapshots, "peer")
+    leader_force_behavior = build_nominal_force_history(snapshots, "behavior")
+    leader_force_guidance = build_nominal_force_history(snapshots, "guidance")
+    leader_force_escape = build_nominal_force_history(snapshots, "escape")
+    leader_force_total = build_nominal_force_history(snapshots, "total")
     step_runtimes = np.asarray([snapshot.step_runtime for snapshot in snapshots], dtype=float)
     mode_runtimes = np.asarray([snapshot.mode_runtime for snapshot in snapshots], dtype=float)
     controller_runtimes = np.asarray([snapshot.controller_runtime for snapshot in snapshots], dtype=float)
@@ -108,6 +128,24 @@ def _write_run_artifact(
         safety_fallbacks=safety_fallbacks,
         qp_solve_times=qp_solve_times,
         qp_iterations=qp_iterations,
+        leader_risk_scores=leader_risk_scores,
+        leader_base_reference_speeds=leader_base_reference_speeds,
+        leader_hazard_speed_caps=leader_hazard_speed_caps,
+        leader_staggered_speed_caps=leader_staggered_speed_caps,
+        leader_release_speed_caps=leader_release_speed_caps,
+        leader_target_speeds=leader_target_speeds,
+        leader_staggered_activations=leader_staggered_activations,
+        leader_edge_hold_activations=leader_edge_hold_activations,
+        leader_force_attractive=leader_force_attractive,
+        leader_force_formation=leader_force_formation,
+        leader_force_consensus=leader_force_consensus,
+        leader_force_road=leader_force_road,
+        leader_force_obstacle=leader_force_obstacle,
+        leader_force_peer=leader_force_peer,
+        leader_force_behavior=leader_force_behavior,
+        leader_force_guidance=leader_force_guidance,
+        leader_force_escape=leader_force_escape,
+        leader_force_total=leader_force_total,
         step_runtimes=step_runtimes,
         mode_runtimes=mode_runtimes,
         controller_runtimes=controller_runtimes,

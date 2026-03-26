@@ -211,6 +211,37 @@ class Action:
 
 
 @dataclass(frozen=True)
+class NominalForceBreakdown:
+    """Leader nominal-force decomposition for replay/debug artifacts."""
+
+    attractive: tuple[float, float] = (0.0, 0.0)
+    formation: tuple[float, float] = (0.0, 0.0)
+    consensus: tuple[float, float] = (0.0, 0.0)
+    road: tuple[float, float] = (0.0, 0.0)
+    obstacle: tuple[float, float] = (0.0, 0.0)
+    peer: tuple[float, float] = (0.0, 0.0)
+    behavior: tuple[float, float] = (0.0, 0.0)
+    guidance: tuple[float, float] = (0.0, 0.0)
+    escape: tuple[float, float] = (0.0, 0.0)
+    total: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class NominalDiagnostics:
+    """Leader-focused nominal diagnostics persisted with each snapshot."""
+
+    leader_risk_score: float = 0.0
+    leader_base_reference_speed: float = 0.0
+    leader_hazard_speed_cap: float = 0.0
+    leader_staggered_speed_cap: float = 0.0
+    leader_release_speed_cap: float = 0.0
+    leader_target_speed: float = 0.0
+    leader_staggered_activation: float = 0.0
+    leader_edge_hold_activation: float = 0.0
+    leader_force: NominalForceBreakdown = field(default_factory=NominalForceBreakdown)
+
+
+@dataclass(frozen=True)
 class SafetyFilterResult:
     """安全滤波器输出。
 
@@ -308,3 +339,4 @@ class Snapshot:
     mode_runtime: float = 0.0
     controller_runtime: float = 0.0
     safety_runtime: float = 0.0
+    nominal_diagnostics: NominalDiagnostics = field(default_factory=NominalDiagnostics)

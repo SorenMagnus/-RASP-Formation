@@ -12,7 +12,14 @@ import numpy as np
 from apflf.analysis.metrics import compute_run_summary
 from apflf.env.road import Road
 from apflf.utils.config import load_config
-from apflf.utils.types import Action, ObstacleState, Snapshot, State
+from apflf.utils.types import (
+    Action,
+    NominalDiagnostics,
+    NominalForceBreakdown,
+    ObstacleState,
+    Snapshot,
+    State,
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,96 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
             "qp_iterations",
             default=np.zeros_like(safety_corrections, dtype=int),
         )
+        leader_risk_scores = _optional_array(
+            data,
+            "leader_risk_scores",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_base_reference_speeds = _optional_array(
+            data,
+            "leader_base_reference_speeds",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_hazard_speed_caps = _optional_array(
+            data,
+            "leader_hazard_speed_caps",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_staggered_speed_caps = _optional_array(
+            data,
+            "leader_staggered_speed_caps",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_release_speed_caps = _optional_array(
+            data,
+            "leader_release_speed_caps",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_target_speeds = _optional_array(
+            data,
+            "leader_target_speeds",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_staggered_activations = _optional_array(
+            data,
+            "leader_staggered_activations",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_edge_hold_activations = _optional_array(
+            data,
+            "leader_edge_hold_activations",
+            default=np.zeros(safe_actions.shape[0], dtype=float),
+        )
+        leader_force_attractive = _optional_array(
+            data,
+            "leader_force_attractive",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_formation = _optional_array(
+            data,
+            "leader_force_formation",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_consensus = _optional_array(
+            data,
+            "leader_force_consensus",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_road = _optional_array(
+            data,
+            "leader_force_road",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_obstacle = _optional_array(
+            data,
+            "leader_force_obstacle",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_peer = _optional_array(
+            data,
+            "leader_force_peer",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_behavior = _optional_array(
+            data,
+            "leader_force_behavior",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_guidance = _optional_array(
+            data,
+            "leader_force_guidance",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_escape = _optional_array(
+            data,
+            "leader_force_escape",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
+        leader_force_total = _optional_array(
+            data,
+            "leader_force_total",
+            default=np.zeros((safe_actions.shape[0], 2), dtype=float),
+        )
         step_runtimes = _optional_array(
             data,
             "step_runtimes",
@@ -133,6 +230,28 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
                 mode_runtime=float(mode_runtimes[step_index - 1]),
                 controller_runtime=float(controller_runtimes[step_index - 1]),
                 safety_runtime=float(safety_runtimes[step_index - 1]),
+                nominal_diagnostics=NominalDiagnostics(
+                    leader_risk_score=float(leader_risk_scores[step_index - 1]),
+                    leader_base_reference_speed=float(leader_base_reference_speeds[step_index - 1]),
+                    leader_hazard_speed_cap=float(leader_hazard_speed_caps[step_index - 1]),
+                    leader_staggered_speed_cap=float(leader_staggered_speed_caps[step_index - 1]),
+                    leader_release_speed_cap=float(leader_release_speed_caps[step_index - 1]),
+                    leader_target_speed=float(leader_target_speeds[step_index - 1]),
+                    leader_staggered_activation=float(leader_staggered_activations[step_index - 1]),
+                    leader_edge_hold_activation=float(leader_edge_hold_activations[step_index - 1]),
+                    leader_force=NominalForceBreakdown(
+                        attractive=tuple(float(value) for value in leader_force_attractive[step_index - 1]),
+                        formation=tuple(float(value) for value in leader_force_formation[step_index - 1]),
+                        consensus=tuple(float(value) for value in leader_force_consensus[step_index - 1]),
+                        road=tuple(float(value) for value in leader_force_road[step_index - 1]),
+                        obstacle=tuple(float(value) for value in leader_force_obstacle[step_index - 1]),
+                        peer=tuple(float(value) for value in leader_force_peer[step_index - 1]),
+                        behavior=tuple(float(value) for value in leader_force_behavior[step_index - 1]),
+                        guidance=tuple(float(value) for value in leader_force_guidance[step_index - 1]),
+                        escape=tuple(float(value) for value in leader_force_escape[step_index - 1]),
+                        total=tuple(float(value) for value in leader_force_total[step_index - 1]),
+                    ),
+                ),
             )
         )
     return ReplayBundle(

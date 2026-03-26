@@ -71,6 +71,7 @@ class World:
         controller_start = perf_counter()
         nominal_actions = self.controller.compute_actions(observation=observation, mode=mode)
         controller_runtime = perf_counter() - controller_start
+        nominal_diagnostics = self.controller.consume_step_diagnostics()
         safety_start = perf_counter()
         safety_result = self.safety_filter.filter(
             nominal_actions=nominal_actions,
@@ -101,6 +102,7 @@ class World:
             mode_runtime=mode_runtime,
             controller_runtime=controller_runtime,
             safety_runtime=safety_runtime,
+            nominal_diagnostics=nominal_diagnostics,
         )
         self._states = next_states
         self._snapshots.append(snapshot)

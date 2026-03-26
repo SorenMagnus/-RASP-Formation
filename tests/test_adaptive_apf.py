@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -99,6 +101,98 @@ def _make_stage5_observation(*, step_index: int, time: float, leader_state: Stat
     )
 
 
+def _pre_release_staggered_cap(
+    controller: AdaptiveAPFController,
+    *,
+    observation: Observation,
+    state: State,
+    mode: str,
+    base_target_speed: float,
+) -> float:
+    """Reconstruct the pre-release staggered cap for release-regression tests."""
+
+    front_obstacles = controller._leader_front_obstacles(observation, state)
+    side_sign = controller._leader_behavior_side_sign(
+        observation,
+        state,
+        mode,
+        front_obstacles=front_obstacles,
+    )
+    assert side_sign is not None
+
+    nominal_relevant = controller._leader_relevant_obstacles(
+        observation,
+        front_obstacles=front_obstacles,
+        side_sign=side_sign,
+    )
+    alternate_relevant = controller._leader_relevant_obstacles(
+        observation,
+        front_obstacles=front_obstacles,
+        side_sign=-side_sign,
+    )
+    assert nominal_relevant
+    assert alternate_relevant
+
+    target_y = controller._leader_behavior_target_y(observation, state, mode)
+    assert target_y is not None
+
+    state_front_x = state.x + 0.5 * controller.config.vehicle_length
+    nominal_rear_gap = min(
+        obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in nominal_relevant
+    )
+    alternate_rear_gap = min(
+        obstacle.x - 0.5 * obstacle.length - state_front_x for obstacle in alternate_relevant
+    )
+    lateral_error = abs(float(target_y - state.y))
+    lateral_dead_zone = 0.25 * controller.config.vehicle_width
+    lateral_window = max(
+        1.5 * controller.config.vehicle_width,
+        0.5 * observation.road.half_width,
+    )
+    engage_distance = max(
+        0.25 * controller.config.obstacle_influence_distance,
+        1.0 * controller.config.vehicle_length,
+    )
+    alternate_lookahead = max(
+        0.5 * controller.config.obstacle_influence_distance,
+        1.5 * controller.config.vehicle_length,
+    )
+    a_nominal_gap = float(
+        max(min((engage_distance - nominal_rear_gap) / max(engage_distance, 1e-6), 1.0), 0.0)
+    )
+    a_alternate_gap = float(
+        max(
+            min(
+                (alternate_lookahead - alternate_rear_gap) / max(alternate_lookahead, 1e-6),
+                1.0,
+            ),
+            0.0,
+        )
+    )
+    a_lateral = float(
+        max(
+            min(
+                (lateral_error - lateral_dead_zone) / max(lateral_window - lateral_dead_zone, 1e-6),
+                1.0,
+            ),
+            0.0,
+        )
+    )
+    a_staggered = a_nominal_gap * a_alternate_gap * a_lateral
+
+    min_gap = min(max(nominal_rear_gap, 0.0), max(alternate_rear_gap, 0.0))
+    max_brake = max(abs(controller.bounds.accel_min), 1e-6)
+    staggered_gap_speed = math.sqrt(max(0.0, 2.0 * max_brake * min_gap))
+    blend = float(max(min(a_staggered * 8.0, 0.80), 0.0))
+    crawl_floor = float(
+        max(min(0.30 + 0.25 * max(state.speed - 0.35, 0.0), 0.70), 0.30)
+    )
+    return max(
+        crawl_floor,
+        (1.0 - blend) * base_target_speed + blend * staggered_gap_speed,
+    )
+
+
 @pytest.mark.parametrize(
     "kind",
     ["formation_cruise", "apf", "st_apf", "apf_lf", "adaptive_apf", "dwa", "orca"],
@@ -171,6 +265,45 @@ def test_stagnation_detection_has_basic_anti_chattering() -> None:
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is False
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is True
     assert controller.update_stagnation(progress_delta=0.0, speed=0.0, force_norm=0.0) is False
+
+
+def test_adaptive_apf_records_leader_nominal_diagnostics() -> None:
+    """Leader nominal diagnostics should expose risk, cap chain, and force decomposition."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=60,
+        time=6.0,
+        leader_state=State(x=26.45, y=-0.28, yaw=0.02, speed=1.05),
+    )
+
+    controller.compute_actions(
+        observation=observation,
+        mode="topology=diamond|behavior=yield_left|gain=cautious",
+    )
+    diagnostics = controller.consume_step_diagnostics()
+
+    assert diagnostics.leader_risk_score > 0.0
+    assert diagnostics.leader_base_reference_speed >= diagnostics.leader_hazard_speed_cap
+    assert diagnostics.leader_hazard_speed_cap >= diagnostics.leader_release_speed_cap
+    assert diagnostics.leader_staggered_speed_cap <= diagnostics.leader_hazard_speed_cap
+    assert diagnostics.leader_release_speed_cap >= diagnostics.leader_staggered_speed_cap
+    assert diagnostics.leader_target_speed <= diagnostics.leader_release_speed_cap
+    assert diagnostics.leader_staggered_activation >= 0.0
+    assert diagnostics.leader_edge_hold_activation >= 0.0
+
+    force_sum = (
+        np.asarray(diagnostics.leader_force.attractive, dtype=float)
+        + np.asarray(diagnostics.leader_force.formation, dtype=float)
+        + np.asarray(diagnostics.leader_force.consensus, dtype=float)
+        + np.asarray(diagnostics.leader_force.road, dtype=float)
+        + np.asarray(diagnostics.leader_force.obstacle, dtype=float)
+        + np.asarray(diagnostics.leader_force.peer, dtype=float)
+        + np.asarray(diagnostics.leader_force.behavior, dtype=float)
+        + np.asarray(diagnostics.leader_force.guidance, dtype=float)
+        + np.asarray(diagnostics.leader_force.escape, dtype=float)
+    )
+    assert np.allclose(force_sum, np.asarray(diagnostics.leader_force.total, dtype=float))
 
 
 def test_adaptive_apf_tapers_nonrelevant_obstacle_lateral_push_after_local_relock() -> None:
@@ -921,3 +1054,107 @@ def test_adaptive_apf_staggered_governor_inactive_without_dual_blockers() -> Non
     assert full_speed == pytest.approx(hazard_only, abs=1e-9), (
         f"staggered governor should be inactive: {full_speed} vs {hazard_only}"
     )
+
+
+def test_adaptive_apf_relocked_edge_release_lifts_staggered_cap_but_stays_bounded() -> None:
+    """Relocked edge-hold should lift the old staggered cap without restoring cruise speed."""
+
+    controller = _make_controller()
+    observation = _make_stage5_observation(
+        step_index=58,
+        time=5.8,
+        leader_state=State(x=25.30, y=-0.73, yaw=-0.21, speed=1.45),
+    )
+    mode = "topology=diamond|behavior=yield_left|gain=cautious"
+    state = observation.states[0]
+    front_obstacles = controller._leader_front_obstacles(observation, state)
+    side_sign = controller._leader_behavior_side_sign(
+        observation,
+        state,
+        mode,
+        front_obstacles=front_obstacles,
+    )
+    assert side_sign is not None
+    relevant_obstacles = controller._leader_relevant_obstacles(
+        observation,
+        front_obstacles=front_obstacles,
+        side_sign=side_sign,
+    )
+    base_target_speed = controller._leader_hazard_speed_limit(
+        observation=observation,
+        state=state,
+        mode=mode,
+        base_target_speed=controller.target_speed,
+    )
+    staggered_cap = _pre_release_staggered_cap(
+        controller,
+        observation=observation,
+        state=state,
+        mode=mode,
+        base_target_speed=base_target_speed,
+    )
+
+    released_cap = controller._leader_relocked_edge_speed_release(
+        observation=observation,
+        state=state,
+        mode=mode,
+        front_obstacles=front_obstacles,
+        relevant_obstacles=relevant_obstacles,
+        side_sign=side_sign,
+        base_target_speed=base_target_speed,
+        staggered_cap=staggered_cap,
+    )
+
+    assert released_cap > staggered_cap
+    assert released_cap <= base_target_speed
+    assert released_cap <= 1.20
+
+
+def test_adaptive_apf_relocked_edge_release_degrades_exactly_when_inactive() -> None:
+    """Without edge-hold activation, the release helper must return the old cap exactly."""
+
+    controller = _make_controller()
+    observation = Observation(
+        step_index=48,
+        time=4.8,
+        states=(
+            State(x=23.36, y=-0.58, yaw=0.01, speed=2.45),
+            State(x=15.46, y=-1.05, yaw=0.08, speed=2.0),
+            State(x=7.56, y=-0.84, yaw=0.01, speed=1.8),
+        ),
+        road=controller.road.geometry,
+        goal_x=120.0,
+        desired_offsets=((0.0, 0.0), (-8.0, 0.0), (-16.0, 0.0)),
+        obstacles=(
+            ObstacleState("single_blocker", 30.0, 2.0, 0.0, 0.0, 4.8, 2.0),
+        ),
+    )
+    mode = "topology=diamond|behavior=yield_right|gain=cautious"
+    state = observation.states[0]
+    front_obstacles = controller._leader_front_obstacles(observation, state)
+    side_sign = controller._leader_behavior_side_sign(
+        observation,
+        state,
+        mode,
+        front_obstacles=front_obstacles,
+    )
+    assert side_sign is not None
+    relevant_obstacles = controller._leader_relevant_obstacles(
+        observation,
+        front_obstacles=front_obstacles,
+        side_sign=side_sign,
+    )
+    staggered_cap = 0.92
+
+    released_cap = controller._leader_relocked_edge_speed_release(
+        observation=observation,
+        state=state,
+        mode=mode,
+        front_obstacles=front_obstacles,
+        relevant_obstacles=relevant_obstacles,
+        side_sign=side_sign,
+        base_target_speed=1.60,
+        staggered_cap=staggered_cap,
+    )
+
+    assert released_cap == staggered_cap
