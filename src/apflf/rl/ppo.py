@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -107,6 +108,7 @@ class PPOTrainer:
         self.timesteps_done = 0
         self.rollout_seed_next = 0
         self.logs: list[dict[str, float]] = []
+        self._session_start_time = 0.0
 
     def train(
         self,
@@ -117,10 +119,16 @@ class PPOTrainer:
     ) -> list[dict[str, float]]:
         if torch is None:  # pragma: no cover - requires optional dependency.
             raise RuntimeError("PPOTrainer requires the optional `torch` dependency.")
+        self._session_start_time = time.perf_counter()
         if resume_from is not None:
             self.load_checkpoint(Path(resume_from), expected_seed=seed)
+            self._emit_progress(
+                event="resume",
+                checkpoint_path=Path(resume_from),
+            )
         else:
             self._initialize_training_state(seed=seed)
+            self._emit_progress(event="start")
 
         if self.config.total_timesteps < self.timesteps_done:
             raise ValueError(
@@ -128,13 +136,29 @@ class PPOTrainer:
             )
 
         while self.timesteps_done < self.config.total_timesteps:
+            rollout_index = self._rollout_index()
+            self._emit_progress(
+                event="rollout_start",
+                rollout_index=rollout_index,
+                rollout_seed=self.rollout_seed_next,
+            )
             batch = self._collect_rollout(seed=self.rollout_seed_next)
             rollout_log = self._update(batch)
-            self.timesteps_done += int(batch["observations"].shape[0])
+            batch_steps = int(batch["observations"].shape[0])
+            self.timesteps_done += batch_steps
             self.rollout_seed_next += 1
             self.logs.append(rollout_log)
             if periodic_checkpoint_path is not None:
                 self.save_checkpoint(Path(periodic_checkpoint_path))
+            self._emit_progress(
+                event="rollout_done",
+                rollout_index=rollout_index,
+                rollout_seed=self.rollout_seed_next - 1,
+                batch_steps=batch_steps,
+                rollout_log=rollout_log,
+                checkpoint_path=periodic_checkpoint_path,
+            )
+        self._emit_progress(event="complete")
         return list(self.logs)
 
     def save_checkpoint(self, path: Path) -> None:
@@ -242,6 +266,50 @@ class PPOTrainer:
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(self.device)
+
+    def _rollout_index(self) -> int:
+        if self.initial_seed is None:
+            return 0
+        return int(self.rollout_seed_next - self.initial_seed + 1)
+
+    def _emit_progress(
+        self,
+        *,
+        event: str,
+        rollout_index: int | None = None,
+        rollout_seed: int | None = None,
+        batch_steps: int | None = None,
+        rollout_log: dict[str, float] | None = None,
+        checkpoint_path: Path | None = None,
+    ) -> None:
+        elapsed_s = max(time.perf_counter() - self._session_start_time, 0.0)
+        total_timesteps = max(int(self.config.total_timesteps), 1)
+        progress_pct = 100.0 * min(self.timesteps_done / total_timesteps, 1.0)
+        message_parts = [
+            f"[ppo] {event}",
+            f"device={self.device.type}",
+            f"seed={self.initial_seed if self.initial_seed is not None else 'unset'}",
+            f"timesteps_done={self.timesteps_done}/{self.config.total_timesteps}",
+            f"progress={progress_pct:.2f}%",
+            f"elapsed_s={elapsed_s:.1f}",
+        ]
+        if rollout_index is not None:
+            message_parts.append(f"rollout_index={rollout_index}")
+        if rollout_seed is not None:
+            message_parts.append(f"rollout_seed={rollout_seed}")
+        if batch_steps is not None:
+            message_parts.append(f"batch_steps={batch_steps}")
+        if checkpoint_path is not None:
+            message_parts.append(f"checkpoint={Path(checkpoint_path).resolve()}")
+        if rollout_log is not None:
+            message_parts.extend(
+                [
+                    f"policy_loss={rollout_log['policy_loss']:.6f}",
+                    f"value_loss={rollout_log['value_loss']:.6f}",
+                    f"entropy={rollout_log['entropy']:.6f}",
+                ]
+            )
+        print(" ".join(message_parts), flush=True)
 
     def _collect_rollout(self, *, seed: int) -> dict[str, np.ndarray]:
         observations: list[np.ndarray] = []

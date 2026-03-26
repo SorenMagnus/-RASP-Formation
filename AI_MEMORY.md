@@ -2,28 +2,35 @@
 
 > 致下一位 AI / 工程师：
 > 请先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动手改代码。
-> 当前项目已经进入 `S5-only rl_param_only` 第一阶段，主阻塞点不再是 nominal governor release 本身，而是长时 PPO 训练无法跨关机恢复。
+> 当前项目已经进入 `S5-only rl_param_only` 第一阶段。主阻塞点已经不是 nominal governor release，而是 RL 长训的稳定执行、checkpoint 落盘和后续 benchmark 闭环。
 
 ---
 
 ## 0. 当前开发游标
 
 - 当前扫描基线：
-  - `HEAD = aa43784bd3b3e22961a934aa9bc8935e1133daf3`
-  - 重写本文件前，`git status --short` 为空；repo-tracked worktree 干净
+  - `HEAD = 1ccb1132629bea5e0aff45d6069854cd655b50b3`
+  - 本次同步前，`git status --short` 显示未提交改动在：
+    - `src/apflf/rl/ppo.py`
+    - `tests/test_rl_supervisor.py`
+  - 这些改动对应的是：`progress logging` 补充与相关测试
 - 当前论文主线：
   - 白盒主链仍是 `FSM -> nominal controller -> CBF-QP safety`
-  - RL 目前仅作为第一阶段 `param-only supervisor` 接入，不控制 `mode`，不控制 `accel/steer`
+  - RL 当前仅作为第一阶段 `param-only supervisor` 接入，不控制 `mode`，不控制 `accel/steer`
 - 当前有效成果：
+  - `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
   - `outputs/rl_train_s5_param_only/checkpoints/smoke.pt`
   - `outputs/s5_rl_smoke_eval_cuda/summary.csv`
-  - `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
+  - `outputs/rl_resume_smoke/checkpoints/latest.pt`
+  - `outputs/rl_resume_smoke/checkpoints/main.pt`
 - 当前未完成成果：
   - `outputs/rl_train_s5_param_only/checkpoints/main.pt` 仍不存在
-  - 本轮曾启动过 `200000` 步正式训练，但训练器只在训练结束后保存 checkpoint；如果关机，这段运行不能算有效成果
+  - `outputs/rl_train_s5_param_only/checkpoints/latest.pt` 仍不存在
+  - 最近一次 `200000` 步 CUDA 长训在首个 rollout 保存点之前异常退出，因此没有留下可恢复进度
 - 当前真实阻塞：
-  - 不是继续修 nominal governor release
-  - 而是先给 PPO 训练链路补上 `periodic checkpoint + rollout-boundary resume`
+  - `checkpoint + resume` 已实现
+  - `progress logging` 已实现
+  - 下一步不再是继续写训练器功能，而是重新发起长训，确认首个 `latest.pt` 落盘，然后等待 `main.pt`
 
 ---
 
@@ -60,7 +67,7 @@
   - `python -m pytest -q`
   - `python -m compileall src tests scripts`
 - 所有实验必须可复现，seed 不能漂
-- 不要在没有 resume 的前提下继续硬跑 `200000` 步长训
+- 长训只能在已经支持 `latest.pt` 周期保存和 `--resume-from` 的前提下运行
 
 ---
 
@@ -101,7 +108,56 @@
   - `torch 2.5.1+cu121`
   - CUDA 可见
 
-### 2.4 诊断与产物
+### 2.4 Checkpoint / Resume
+
+- `PPOTrainer` 已支持：
+  - 每个完整 rollout + PPO update 后保存 `latest.pt`
+  - 从 `--resume-from` 在 rollout 边界恢复
+- 训练态已写入 richer checkpoint payload，包括：
+  - `optimizer_state_dict`
+  - `obs_stats_count`
+  - `obs_stats_mean`
+  - `obs_stats_m2`
+  - `timesteps_done`
+  - `rollout_seed_next`
+  - `initial_seed`
+  - `numpy_rng_state`
+  - `torch_cpu_rng_state`
+  - `torch_cuda_rng_state_all`
+  - `trainer_config`
+- 保存方式已使用“临时文件 + 原子替换”，避免 `latest.pt` 被半写坏
+- 推理兼容性保持不变：
+  - `main.pt` / `latest.pt` 仍包含原推理所需字段
+  - `policy.py` 无需修改即可加载推理所需内容
+
+### 2.5 Progress Logging
+
+- 训练器已支持 `stdout` 进度打印，并且每条都 `flush=True`
+- 当前会打印的事件：
+  - `[ppo] start`
+  - `[ppo] resume`
+  - `[ppo] rollout_start`
+  - `[ppo] rollout_done`
+  - `[ppo] complete`
+- 每条日志包含的关键信息：
+  - `device`
+  - `seed`
+  - `timesteps_done=current/total`
+  - `progress=...%`
+  - `elapsed_s`
+  - `rollout_index`
+  - `rollout_seed`
+  - `batch_steps`
+  - `policy_loss`
+  - `value_loss`
+  - `entropy`
+  - `checkpoint=...`（在 rollout 保存后打印）
+- 因此后台训练时，应优先查看：
+  - `outputs/rl_train_s5_param_only/logs/main_stdout.log`
+- safety fallback 仍会继续进入：
+  - `outputs/rl_train_s5_param_only/logs/main_stderr.log`
+
+### 2.6 诊断与产物
 
 - summary / traj artifact 已持久化 RL 诊断字段，包括：
   - `rl_fallback_count`
@@ -118,10 +174,10 @@
   - `decision_rl_fallbacks`
   - `decision_theta_clipped`
 
-### 2.5 验证结果
+### 2.7 验证结果
 
-- 非侵入式验证已通过：
-  - `python -m pytest -q` -> `105 passed`
+- 当前验证结果：
+  - `python -m pytest -q` -> `109 passed`
   - `python -m compileall src tests scripts` -> 通过
 - `no_rl` 基线已冻结：
   - 文件：`outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
@@ -137,6 +193,10 @@
   - `fallback_events = 203`
   - `collision_count = 0`
   - `boundary_violation_count = 0`
+- `resume smoke` 已成功：
+  - 路径：`outputs/rl_resume_smoke/checkpoints/`
+  - 首次短训可生成 `latest.pt`
+  - 从 `latest.pt` 恢复后可把 `timesteps_done` 从 `4` 续到 `8`
 - smoke eval 中 RL 字段有效，但这只是链路验证，不是性能突破：
   - `rl_fallback_count = 220`
   - `rl_confidence_mean = 0.08346643664620139`
@@ -150,126 +210,93 @@
 - 当前能确认的只有：
   - RL 路径已接上
   - GPU smoke 训练可跑
-  - checkpoint 保存链路至少能在训练结束时写出 `smoke.pt`
+  - checkpoint / resume 路径可跑
+  - progress logging 已可见
   - smoke eval 无碰撞/越界回归
 - 当前还不能确认：
   - `rl_param_only` 是否能在 `seed 0/1/2` 上优于 `no_rl`
-- 当前正式训练状态：
-  - 曾经启动过 `200000` 步 CUDA 长训
-  - 当前没有 `main.pt`
-  - `main_stdout.log` 为空
-  - `main_stderr.log` 仅有运行时 fallback 日志，不能替代 checkpoint
-  - 由于 trainer 只在训练结束后保存，关机即丢失进度
+- 当前长训状态：
+  - 最近一次 `200000` 步 CUDA 长训已异常退出
+  - 首个 rollout 完成前未生成 `latest.pt`
+  - 因此没有可恢复的长训进度
+- 这意味着：
+  - 现在不是继续写训练器功能
+  - 而是重新发起长训，并利用新的 progress logging 观察它是否成功跨过首个 rollout 保存点
 
 ---
 
 ## 4. 下一步指令
 
-### 4.1 下一个工程师启动后，第一件事要写的代码
+### 4.1 下一个工程师启动后，第一件事要做什么
 
-请直接修改：
+不要再继续改 `checkpoint + resume` 代码。  
+请直接重新发起 `S5-only rl_param_only` 的 `200000` 步 CUDA 长训：
 
-- `src/apflf/rl/ppo.py`
-- `scripts/train_rl_supervisor.py`
-- `tests/test_rl_supervisor.py`
+```bash
+python scripts/train_rl_supervisor.py --config configs/scenarios/s5_dense_multi_agent.yaml --seed 0 --total-timesteps 200000 --steps-per-rollout 512 --learning-rate 3e-4 --device cuda --output outputs/rl_train_s5_param_only/checkpoints/main.pt
+```
 
-目标：
+### 4.2 第一阶段运行验收
 
-- 为 `S5-only rl_param_only` 的长时 PPO 训练加入：
-  - 周期性 checkpoint
-  - rollout-boundary resume
+重新启动长训后，优先盯以下两处：
 
-### 4.2 必须满足的数学 / 算法约束
+1. `main_stdout.log`
+- 命令：
+```powershell
+Get-Content outputs/rl_train_s5_param_only/logs/main_stdout.log -Wait
+```
+- 预期能看到：
+  - `[ppo] start`
+  - `[ppo] rollout_start`
+  - `[ppo] rollout_done ... checkpoint=...latest.pt`
 
-设在第 `k` 个 rollout 完成采样与 PPO update 后保存训练态，记该训练态为：
+2. `latest.pt`
+- 命令：
+```powershell
+Test-Path outputs/rl_train_s5_param_only/checkpoints/latest.pt
+```
+- 一旦返回 `True`，说明首个可恢复保存点已建立
 
-`S_k = {network, optimizer, obs_stats(count, mean, m2), timesteps_done, rollout_seed_next, numpy_rng, torch_cpu_rng, torch_cuda_rng}`
+### 4.3 如果需要关机，如何回档
 
-必须满足：
+只有当下面文件存在时，才允许放心关机：
 
-1. 只允许在完整 rollout 边界保存
-- 必须在“完整 rollout 收集 + 完整 PPO update”之后保存
-- 严禁 mid-rollout 保存
-- 严禁 mid-rollout 恢复
+- `outputs/rl_train_s5_param_only/checkpoints/latest.pt`
 
-2. resume 必须恢复完整训练态
-- 从 `S_k` 恢复后，后续 rollout 次序必须与未中断训练一致
-- 后续 PPO update 次序必须与未中断训练一致
-- 恢复后训练不能只恢复 `network`，必须同时恢复：
-  - `optimizer`
-  - `obs_stats.count`
-  - `obs_stats.mean`
-  - `obs_stats.m2`
-  - `timesteps_done`
-  - `rollout_seed_next`
-  - `numpy_rng`
-  - `torch_cpu_rng`
-  - `torch_cuda_rng`
+下次开机后，必须用这个命令续跑：
 
-3. 不带 `--resume-from` 时必须精确退化
-- 若 CLI 未提供 `--resume-from`
-- 训练行为必须与当前版本精确一致
-- 不能改变现有 smoke / training 默认行为
+```bash
+python scripts/train_rl_supervisor.py --config configs/scenarios/s5_dense_multi_agent.yaml --seed 0 --total-timesteps 200000 --steps-per-rollout 512 --learning-rate 3e-4 --device cuda --resume-from outputs/rl_train_s5_param_only/checkpoints/latest.pt --output outputs/rl_train_s5_param_only/checkpoints/main.pt
+```
 
-4. 周期性保存频率
-- 默认每 `1` 个 rollout 保存一次
-- 因当前 `steps_per_rollout = 512`
-- 所以崩溃 / 关机时最大损失步数必须 `< 512`
+注意：
 
-5. 不改变 PPO 数学本体
-- checkpoint 只保存训练态
-- 不改 reward
-- 不改 controller
-- 不改 safety
-- 不改 `theta` 空间定义
+- 不要用旧的 `smoke.pt` 续跑长训
+- 长训回档点必须是 `latest.pt`
 
-### 4.3 需要新增的训练行为
+### 4.4 如果长训再次异常退出
 
-- `scripts/train_rl_supervisor.py` 必须新增：
-  - `--resume-from`
-- 训练目录中必须周期性写出：
-  - `latest.pt`
-- 建议行为：
-  - 正式输出 `main.pt`
-  - 周期性覆盖 `latest.pt`
-  - 训练正常结束后，`main.pt` 仍作为最终 checkpoint
+不要立刻重写控制器或 safety。  
+先做最小排查：
 
-### 4.4 必须补的测试
+1. 看 `main_stdout.log`
+- 确认是否至少打印到了 `[ppo] rollout_start`
 
-在 `tests/test_rl_supervisor.py` 中新增 / 扩展测试，至少覆盖：
+2. 看 `main_stderr.log`
+- 确认是否只有 fallback 输出
+- 还是出现了 Python traceback / OOM / CUDA error
 
-1. 训练态保存测试
-- 一个短训练后能生成 `latest.pt`
-- checkpoint 中包含完整 resume 必需字段
+3. 看 `latest.pt` 是否存在
+- 若不存在，说明仍死在首个 rollout 保存点之前
+- 此时下一步应该补“异常 traceback 输出 / 首轮 heartbeat 更细粒度日志”，而不是改论文算法
 
-2. resume 等价性测试
-- 同 seed 下：
-  - 直接短训 `N` rollout
-  - 先训 `k` rollout 保存，再从 `latest.pt` resume 到 `N` rollout
-- 二者最终关键训练态必须对齐
-- 至少核对：
-  - `timesteps_done`
-  - network 参数
-  - optimizer 状态
-  - obs stats
+### 4.5 长训完成后的实验闭环
 
-3. CLI 回归测试
-- 不带 `--resume-from` 时行为与旧版一致
-- 带 `--resume-from` 时可以继续推进 timesteps
+只有 `main.pt` 真正生成后，才运行：
 
-### 4.5 下一阶段验收门槛
-
-实现 resume 后，按以下顺序验收：
-
-1. `python -m pytest -q`
-2. `python -m compileall src tests scripts`
-3. 新的最小 smoke：
-  - 先生成 `latest.pt`
-  - 再从 `latest.pt` resume 一次
-  - 验证 checkpoint 会更新，timesteps 会继续推进
-4. 只有 resume 路径通过后，才重新发起 `200000` 步 CUDA 正式训练
-5. `main.pt` 真正生成后，再运行：
-  - `python scripts/benchmark_s5_rl.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --rl-checkpoint outputs/rl_train_s5_param_only/checkpoints/main.pt --exp-id-prefix s5_rl_stage1_cuda --deterministic-eval`
+```bash
+python scripts/benchmark_s5_rl.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --rl-checkpoint outputs/rl_train_s5_param_only/checkpoints/main.pt --exp-id-prefix s5_rl_stage1_cuda --deterministic-eval
+```
 
 阶段性成功判据仍是：
 
@@ -282,42 +309,29 @@
 
 ## 5. 下次开机后的计划
 
-1. 不依赖本轮后台长训的任何进度
-- 默认视为 `main.pt` 不存在
-- 默认视为当前长训进度无效
+1. 先确认当前长训是否仍在运行
+- 若没有运行，则直接重新发起长训
 
-2. 第一件事不是重跑 `200000` 步
-- 先实现 `PPO checkpoint + resume`
+2. 发起长训后立刻观察 `stdout`
+- 用 `main_stdout.log` 看 `[ppo] start / rollout_start / rollout_done`
 
-3. 写完后立刻做基础验证
-- `python -m pytest -q`
-- `python -m compileall src tests scripts`
+3. 首个关键目标不是 `main.pt`
+- 而是先看到 `latest.pt` 成功落盘
 
-4. 再做 resume smoke
-- 短训生成 `latest.pt`
-- 从 `latest.pt` 恢复一次
-- 确认 timesteps 继续增长
-- 确认 checkpoint 被刷新
+4. 一旦 `latest.pt` 出现
+- 以后就允许关机
+- 以后就允许用 `--resume-from latest.pt` 续跑
 
-5. resume 验证通过后，再重启正式训练
-- 用 CUDA
-- 用 `main.pt` 作为最终输出
-- 用 `latest.pt` 作为周期性恢复点
+5. 只有 `main.pt` 生成后，才进入 benchmark
 
-6. 正式训练结束后再做 benchmark
-- 对照 `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
-- 跑 `seed 0/1/2`
-
-7. benchmark 通过后再决定是否扩到 `S4`
-- 在此之前，不允许扩到 `S4`
-- 在此之前，不允许多场景混训
+6. benchmark 通过前，不允许扩到 `S4`
 
 ---
 
 ## 6. 不要做的事
 
 - 不要再把下一步写回 nominal governor release
-- 不要在没有 resume 的前提下继续硬跑 `200000` 步长训
+- 不要再回头重复实现 `checkpoint + resume`
 - 不要修改：
   - `src/apflf/safety/safety_filter.py`
   - `src/apflf/safety/cbf.py`
@@ -330,9 +344,10 @@
   - 多场景混训
 - 不要改 `ModeDecision` 的字段形状
 - 不要改 `compute_actions(observation, mode, theta=None)` 的公共签名
+- 不要用 `smoke.pt` 当长训恢复点
 
 ---
 
 ## 7. 一句话交接
 
-当前仓库已经从“是否引入 RL”推进到了“RL 第一阶段已接上、GPU smoke 已跑通”，但真正的工程阻塞点已经变成了“长时 PPO 训练无法跨关机恢复”。下一位工程师不要再回头修 nominal governor release，也不要碰 safety；请先把 `ppo.py + train_rl_supervisor.py + test_rl_supervisor.py` 的 `periodic checkpoint + rollout-boundary resume` 做完，再重启正式训练。
+当前仓库已经从“是否引入 RL”推进到了“RL 第一阶段已接上、checkpoint + resume 已实现、progress logging 已实现”。下一个工程师不要再回头修 governor release，也不要碰 safety；请直接重新发起 `200000` 步 CUDA 长训，盯住 `main_stdout.log` 与 `latest.pt`，先确保首个可恢复保存点建立，再等待 `main.pt` 和后续 benchmark。

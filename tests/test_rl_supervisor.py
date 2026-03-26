@@ -365,7 +365,7 @@ def test_ppo_trainer_resume_matches_uninterrupted_training(tmp_path: Path) -> No
     assert resumed.logs == continuous.logs
 
 
-def test_train_script_cli_writes_main_and_latest_without_resume(tmp_path: Path, monkeypatch) -> None:
+def test_train_script_cli_writes_main_and_latest_without_resume(tmp_path: Path, monkeypatch, capsys) -> None:
     _require_torch()
     train_script = _load_train_script_module()
     config = _default_config()
@@ -396,9 +396,14 @@ def test_train_script_cli_writes_main_and_latest_without_resume(tmp_path: Path, 
     assert train_script.main() == 0
     assert output_path.exists()
     assert output_path.with_name("latest.pt").exists()
+    captured = capsys.readouterr()
+    assert "[ppo] start" in captured.out
+    assert "[ppo] rollout_start" in captured.out
+    assert "[ppo] rollout_done" in captured.out
+    assert "timesteps_done=4/4" in captured.out
 
 
-def test_train_script_cli_resume_continues_timesteps(tmp_path: Path, monkeypatch) -> None:
+def test_train_script_cli_resume_continues_timesteps(tmp_path: Path, monkeypatch, capsys) -> None:
     _require_torch()
     train_script = _load_train_script_module()
     config = _default_config()
@@ -427,6 +432,7 @@ def test_train_script_cli_resume_continues_timesteps(tmp_path: Path, monkeypatch
         ],
     )
     assert train_script.main() == 0
+    capsys.readouterr()
 
     first_payload = torch.load(latest_path, map_location="cpu")
     first_mtime = latest_path.stat().st_mtime
@@ -454,7 +460,11 @@ def test_train_script_cli_resume_continues_timesteps(tmp_path: Path, monkeypatch
     )
     assert train_script.main() == 0
 
+    captured = capsys.readouterr()
     second_payload = torch.load(latest_path, map_location="cpu")
     assert second_payload["timesteps_done"] == 8
     assert second_payload["timesteps_done"] > first_payload["timesteps_done"]
     assert latest_path.stat().st_mtime >= first_mtime
+    assert "[ppo] resume" in captured.out
+    assert "[ppo] rollout_done" in captured.out
+    assert "timesteps_done=8/8" in captured.out
