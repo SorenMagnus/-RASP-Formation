@@ -1,325 +1,338 @@
 # AI_MEMORY - 当前周期交接文档
 
 > 致下一位 AI / 工程师：
-> 请先完整读完本文件，再动手改代码。
-> 当前项目不是脚手架阶段，而是论文原型后期收敛阶段。
-> 当前唯一真正卡住论文主结果的瓶颈，仍然是 `S5 dense_multi_agent` 中 leader 无法穿过第一组 staggered chicane。
+> 请先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动手改代码。
+> 当前项目已经进入 `S5-only rl_param_only` 第一阶段，主阻塞点不再是 nominal governor release 本身，而是长时 PPO 训练无法跨关机恢复。
 
 ---
 
-## 0. 强制阅读顺序
-1. `AI_MEMORY.md`（本文件）
-2. `PROMPT_SYSTEM.md`
-3. `RESEARCH_GOAL.md`
-4. `src/apflf/controllers/adaptive_apf.py`
-5. `src/apflf/controllers/apf_lf.py`
-6. `src/apflf/decision/fsm_mode.py`
-7. `tests/test_adaptive_apf.py`
-8. `tests/test_modes.py`
+## 0. 当前开发游标
+
+- 当前扫描基线：
+  - `HEAD = aa43784bd3b3e22961a934aa9bc8935e1133daf3`
+  - 重写本文件前，`git status --short` 为空；repo-tracked worktree 干净
+- 当前论文主线：
+  - 白盒主链仍是 `FSM -> nominal controller -> CBF-QP safety`
+  - RL 目前仅作为第一阶段 `param-only supervisor` 接入，不控制 `mode`，不控制 `accel/steer`
+- 当前有效成果：
+  - `outputs/rl_train_s5_param_only/checkpoints/smoke.pt`
+  - `outputs/s5_rl_smoke_eval_cuda/summary.csv`
+  - `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
+- 当前未完成成果：
+  - `outputs/rl_train_s5_param_only/checkpoints/main.pt` 仍不存在
+  - 本轮曾启动过 `200000` 步正式训练，但训练器只在训练结束后保存 checkpoint；如果关机，这段运行不能算有效成果
+- 当前真实阻塞：
+  - 不是继续修 nominal governor release
+  - 而是先给 PPO 训练链路补上 `periodic checkpoint + rollout-boundary resume`
 
 ---
 
 ## 1. 技术栈红线
 
 ### 1.1 架构红线
-- 必须保持三层闭环：Nominal -> Safety Filter -> Mode Decision。
-- 禁止修改：
+
+- 必须保持三层白盒闭环：
+  - `Mode Decision -> Nominal Controller -> Safety Filter`
+- 严禁修改以下安全层核心文件：
   - `src/apflf/safety/safety_filter.py`
   - `src/apflf/safety/cbf.py`
   - `src/apflf/safety/qp_solver.py`
-- 禁止把问题改写成 ROS / CUDA / 端到端黑盒 / RL 主方案。
-- 禁止为了过 S5 而写场景硬编码分支。
+- RL 当前只允许 `param-only supervisor`：
+  - 不允许直接控制 `mode`
+  - 不允许直接输出 `accel`
+  - 不允许直接输出 `steer`
+- 不允许把论文主线改写成端到端 RL / 黑盒策略 / ROS 重构 / CUDA 重写
+- 不允许引入 `SB3`；当前 PPO 后端必须继续沿用仓库内自定义 Torch 实现
 
-### 1.2 工程红线
-- Python 技术栈保持不变：Python 3.10+, numpy, scipy, PyYAML, matplotlib, osqp, pytest。
+### 1.2 接口红线
+
+- 决策层公共接口已经冻结为：
+  - `ModeDecision(mode, theta, source, confidence)`
+- controller 公共入口已经冻结为：
+  - `compute_actions(observation, mode, theta=None)`
+- 必须保持：
+  - `theta=None` 时精确退化到当前白盒基线
+  - FSM 和 RL supervisor 共用同一 `ModeDecision` 输出形状
+
+### 1.3 工程红线
+
 - 每次改动后必须运行：
   - `python -m pytest -q`
   - `python -m compileall src tests scripts`
-- 所有实验必须可复现，seed 不能漂。
-
-### 1.3 编码红线
-- 禁止直接硬改 `accel` 或硬钳 `force_x` 做 S5 特判。
-- 允许做的是：几何目标、参考速度、平滑有界的 nominal shaping。
-- 所有新增函数必须有 docstring。
-- 所有新激活函数必须满足平滑、有界、可退化回原逻辑。
-- 当新逻辑“未激活”时，必须精确退化为旧逻辑，而不是近似退化。
+- 所有实验必须可复现，seed 不能漂
+- 不要在没有 resume 的前提下继续硬跑 `200000` 步长训
 
 ---
 
-## 2. 当前开发游标
+## 2. 已完成工作
 
-### 2.1 当前分支状态
-- 当前 `HEAD`：`0c48fde7488771e5cd92a1b32ad72e9960434d8e`
-- 当前工作区有未提交改动，集中在：
-  - `src/apflf/controllers/adaptive_apf.py`
-  - `src/apflf/controllers/apf_lf.py`
-  - `src/apflf/decision/fsm_mode.py`
-  - `tests/test_adaptive_apf.py`
-  - `tests/test_modes.py`
+### 2.1 决策层
 
-### 2.2 当前稳定开发游标
-- 当前稳定保留的最新思路不是“更早翻边”，也不是“更强 x-force 衰减”。
-- 当前保留下来的稳定改动是：
-  - `post-relock target_x hold`
-  - `post-relock target_y edge-hold`
-  - 以及此前已经通过回归的 staggered governor / lateral boost / steer bias / FSM relock 优化
-- 当前**不要**继续沿着“直接额外衰减 obstacle force_x”这条线走；这条线已经试过，完整 seed0 会把 `fallback_events` 从 `203` 拉高到 `342`，副作用过大，已判定为坏方向。
+- 已统一决策接口：
+  - `src/apflf/utils/types.py` 中已有 `ModeDecision(mode, theta, source, confidence)`
+- FSM 已接入统一接口：
+  - `src/apflf/decision/fsm_mode.py` 返回 `ModeDecision`
+  - FSM 默认输出确定性 `theta`
+- RL supervisor 已落地：
+  - `src/apflf/decision/rl_mode.py`
+  - 已具备 fallback FSM、theta 投影、rate-limit、confidence gate、OOD gate
 
-### 2.3 当前稳定验证状态
-- `python -m pytest -q` -> **99 passed**
-- `python -m compileall src tests scripts` -> **通过**
+### 2.2 控制层
 
----
+- controller 入口已统一为：
+  - `compute_actions(observation, mode, theta=None)`
+- 当前 RL 只通过 `theta` 调度 nominal 层的有界参数：
+  - 不直接改 `accel`
+  - 不直接改 `steer`
+- 这条链路已在 controller / world / runner 中打通
 
-## 3. 已完成工作
+### 2.3 RL 基础设施
 
-### 3.1 `adaptive_apf.py` 已完成
-以下改动都已经保留在当前工作区，并通过回归：
+- 以下 RL 文件已经在树上，且可导入、可运行：
+  - `src/apflf/decision/rl_mode.py`
+  - `src/apflf/rl/features.py`
+  - `src/apflf/rl/env.py`
+  - `src/apflf/rl/policy.py`
+  - `src/apflf/rl/ppo.py`
+  - `scripts/train_rl_supervisor.py`
+  - `scripts/benchmark_s5_rl.py`
+  - `tests/test_rl_supervisor.py`
+- 当前 Torch GPU 环境已可用：
+  - `torch 2.5.1+cu121`
+  - CUDA 可见
 
-- 增加平滑激活基础设施：
-  - `_smoothstep01`
-  - `_rising_activation`
-  - `_falling_activation`
-- 增加 leader hazard 诊断：
-  - `_leader_nearest_rear_gap`
-  - `_leader_staggered_hazard_activation`
-- 增加 staggered dual-blocker 纵向 shaping：
-  - `_shape_leader_staggered_obstacle_force`
-  - `_leader_staggered_longitudinal_relief`
-- 增强 leader hazard 速度治理：
-  - `_leader_hazard_speed_limit` 现在显式考虑 staggered activation
-  - `_leader_staggered_hazard_speed_cap` 已采用更激进但仍有界的参数
-  - near-stop 状态下加了 `state.speed <= 0.35` 保护，不再盲目继续压速
-- 增加横向 nominal 杠杆：
-  - `_leader_staggered_lateral_boost`
-  - `_leader_staggered_steer_bias`
-- `compute_actions()` 已集成：
-  - staggered lateral boost
-  - leader steer bias
-  - 低速 hazard braking cap
+### 2.4 诊断与产物
 
-### 3.2 `apf_lf.py` 已完成
-以下几何逻辑已经落地并保留：
+- summary / traj artifact 已持久化 RL 诊断字段，包括：
+  - `rl_fallback_count`
+  - `rl_confidence_mean`
+  - `rl_confidence_min`
+  - `theta_delta_linf_mean`
+  - `theta_delta_linf_max`
+  - `theta_clip_events`
+- traj 中已落盘：
+  - `decision_sources`
+  - `decision_thetas`
+  - `decision_theta_deltas`
+  - `decision_confidences`
+  - `decision_rl_fallbacks`
+  - `decision_theta_clipped`
 
-- 局部翻边阈值从原始版本下调到：
-  - `commitment_threshold = max(0.33 * vehicle_width, 0.17 * half_width)`
-- 增加 relock 后的局部 `target_x` 保持：
-  - `_leader_relocked_target_x_hold`
-- 增加 relock 后的 edge-hold 几何激活：
-  - `_leader_relocked_edge_hold_activation`
-- 增加 relock 后 `target_y` 的 centerline blend 抑制：
-  - `_leader_relocked_centerline_blend_hold`
-- 当前保留的几何结论：
-  - 在 `yield_left` 且 dual-blocker 仍存在时，`target_y` 不应过早抬向 channel centerline；
-  - 应先沿 `dense_static_right` 的安全边缘线附近走，即 `target_y ≈ 0.45`。
+### 2.5 验证结果
 
-### 3.3 `fsm_mode.py` 已完成
-- 局部 relock commitment threshold 已同步到：
-  - `max(0.33 * vehicle_width, 0.17 * half_width)`
-- 增加 hazard-side relock 快速通过机制：
-  - `_is_hazard_side_relock`
-- `_apply_hysteresis()` 现在允许 hazard side relock 绕过通用 hysteresis。
-
-### 3.4 测试已完成
-- `tests/test_adaptive_apf.py`
-  - 补了 staggered activation、staggered longitudinal relief、lateral boost、steer bias、preflip dual-blocker throttling 等测试
-  - 低速 braking cap 断言已对齐当前浮点行为
-- `tests/test_modes.py`
-  - 补了 FSM hazard relock 测试
-  - 补了 APF-LF local flip / relocked target_x / relocked target_y hold 测试
-- 当前全量测试数：**99 passed**
+- 非侵入式验证已通过：
+  - `python -m pytest -q` -> `105 passed`
+  - `python -m compileall src tests scripts` -> 通过
+- `no_rl` 基线已冻结：
+  - 文件：`outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
+  - `seed0 leader_final_x = 26.634774055574823`
+  - `fallback_events = 203`
+  - `safety_interventions = 238`
+  - `collision_count = 0`
+  - `boundary_violation_count = 0`
+- `500` 步 CUDA smoke 已成功：
+  - checkpoint：`outputs/rl_train_s5_param_only/checkpoints/smoke.pt`
+  - eval：`outputs/s5_rl_smoke_eval_cuda/summary.csv`
+  - `leader_final_x = 26.634774055574823`
+  - `fallback_events = 203`
+  - `collision_count = 0`
+  - `boundary_violation_count = 0`
+- smoke eval 中 RL 字段有效，但这只是链路验证，不是性能突破：
+  - `rl_fallback_count = 220`
+  - `rl_confidence_mean = 0.08346643664620139`
+  - `theta_clip_events = 220`
 
 ---
 
-## 4. 本周期关键实验结论
+## 3. 当前真实实验状态
 
-### 4.1 当前保留的稳定实验结果
-保留版本对应实验：
-- `outputs/s5_seed0_targety_hold_v1/summary.csv`
-
-结果：
-- `leader_final_x = 26.630563706474664`
-- `fallback_events = 203`
-- `safety_interventions = 229`
-- `reached_goal = False`
-
-和上一版相比：
-- `leader_final_x` 基本没破平台
-- `fallback_events` 没变
-- 但 `safety_interventions` 从 `253` 降到了 `229`
-
-这说明：
-- `target_y edge-hold` 让 nominal 与 safety 的耦合更顺了
-- 但还没有把主结果打穿
-
-### 4.2 已证实的正确信号
-最重要的新结论：
-
-- 在旧版本中，step 59 以后 nominal preview margin 对 `dense_static_right` 为负，safety 需要持续纠正。
-- 在当前保留的 `target_y hold` 几何下，局部回放表明：
-  - step 56-65 期间 leader 经常达到 nominal = safe
-  - 说明问题已不再主要是“safety 反复否决 nominal”
-  - 而转移成了“nominal 自己过于保守，把自己刹停”
-
-这一步非常关键。
-它把问题从“几何不可行”推进成了“几何已基本可行，但 governor 释放不足”。
-
-### 4.3 已证伪的坏方向
-以下分支已经试过，结论是不要保留：
-
-1. 更早 local flip / 更早 FSM relock
-- 实验：`outputs/s5_seed0_early_relock_v1/summary.csv`
-- 结果：
-  - `leader_final_x = 26.618069427623887`
-  - `fallback_events = 215`
-- 结论：
-  - 提前两拍翻边会把系统带进另一套停滞盆地，方向错误
-
-2. 额外 `x-force` 衰减分支
-- 实验：`outputs/s5_seed0_targety_xrelief_v1/summary.csv`
-- 结果：
-  - `leader_final_x = 26.64872172142302`
-  - `fallback_events = 342`
-- 结论：
-  - 虽然 `leader_final_x` 略升，但 safety/fallback 指标严重恶化，不能留
+- 当前 S5 论文级主问题还没有被 RL 打穿
+- 当前能确认的只有：
+  - RL 路径已接上
+  - GPU smoke 训练可跑
+  - checkpoint 保存链路至少能在训练结束时写出 `smoke.pt`
+  - smoke eval 无碰撞/越界回归
+- 当前还不能确认：
+  - `rl_param_only` 是否能在 `seed 0/1/2` 上优于 `no_rl`
+- 当前正式训练状态：
+  - 曾经启动过 `200000` 步 CUDA 长训
+  - 当前没有 `main.pt`
+  - `main_stdout.log` 为空
+  - `main_stderr.log` 仅有运行时 fallback 日志，不能替代 checkpoint
+  - 由于 trainer 只在训练结束后保存，关机即丢失进度
 
 ---
 
-## 5. 当前真实瓶颈
+## 4. 下一步指令
 
-当前稳定代码下，S5 的主要瓶颈已经非常明确：
+### 4.1 下一个工程师启动后，第一件事要写的代码
 
-- `post-relock target_y` 过早抬向 centerline 这个问题，已经被部分修正。
-- 当前剩余核心瓶颈不是 safety filter 本身。
-- 当前剩余核心瓶颈是：
-  - leader 在 edge-hold 几何已经成立后，
-  - nominal 的速度治理仍然过于保守，
-  - reference speed / crawl floor 释放太慢，
-  - 导致 leader 在 `x ≈ 26.6` 左右再次自停。
-
-一句话：
-**下一步该做的是 governor release，不是继续做 obstacle-force shaping。**
-
----
-
-## 6. 下一步指令
-
-### 6.1 下一个工程师启动后，第一件事要写的代码
 请直接修改：
-- `src/apflf/controllers/adaptive_apf.py`
+
+- `src/apflf/rl/ppo.py`
+- `scripts/train_rl_supervisor.py`
+- `tests/test_rl_supervisor.py`
 
 目标：
-- 新增一个 **leader-only / relock-edge-hold-only / smooth-bounded** 的
-  `post-relock governor release` 辅助函数，
-- 并在 `_leader_staggered_hazard_speed_cap()` 内调用它，
-- 让 leader 在 edge-hold 已建立时，不再把参考速度继续压到“自停”。
 
-### 6.2 必须满足的数学约束
-设：
-- `a_hold = self._leader_relocked_edge_hold_activation(...)`
-- `staggered_cap` 为当前 `_leader_staggered_hazard_speed_cap()` 已算出的旧输出
-- `base_target_speed` 为进入 staggered governor 之前的输入
+- 为 `S5-only rl_param_only` 的长时 PPO 训练加入：
+  - 周期性 checkpoint
+  - rollout-boundary resume
 
-要求你实现的新函数满足：
+### 4.2 必须满足的数学 / 算法约束
 
-1. 零激活精确退化
-- 若 `a_hold <= 1e-6`，新逻辑必须**精确返回旧的** `staggered_cap`
-- 不能是“接近旧值”，必须是完全一样
+设在第 `k` 个 rollout 完成采样与 PPO update 后保存训练态，记该训练态为：
 
-2. 平滑有界释放
-- 定义一个平滑有界的 floor，例如：
-  - `release_floor = clip(0.85 + 0.35 * a_hold, 0.85, 1.20)`
-- 最终输出示例形式：
-  - `released_cap = min(base_target_speed, max(staggered_cap, release_floor))`
+`S_k = {network, optimizer, obs_stats(count, mean, m2), timesteps_done, rollout_seed_next, numpy_rng, torch_cpu_rng, torch_cuda_rng}`
 
-3. 单调性
-- 当 `a_hold` 增大时，release 只能单调增强，不能出现反向压速
+必须满足：
 
-4. 有界性
-- 释放后速度上界不得超过 `base_target_speed`
-- release floor 必须保持在一个小速度区间内，建议 `[0.85, 1.20]`
-- 禁止重新放回 cruise speed
+1. 只允许在完整 rollout 边界保存
+- 必须在“完整 rollout 收集 + 完整 PPO update”之后保存
+- 严禁 mid-rollout 保存
+- 严禁 mid-rollout 恢复
 
-5. 作用域约束
-- 只对 leader 生效
-- 只在 dual-blocker + relocked edge-hold 几何下生效
-- 不得改 safety 层
-- 不得直接写死 `accel`
-- 不得再做额外的 obstacle force x 特判
+2. resume 必须恢复完整训练态
+- 从 `S_k` 恢复后，后续 rollout 次序必须与未中断训练一致
+- 后续 PPO update 次序必须与未中断训练一致
+- 恢复后训练不能只恢复 `network`，必须同时恢复：
+  - `optimizer`
+  - `obs_stats.count`
+  - `obs_stats.mean`
+  - `obs_stats.m2`
+  - `timesteps_done`
+  - `rollout_seed_next`
+  - `numpy_rng`
+  - `torch_cpu_rng`
+  - `torch_cuda_rng`
 
-### 6.3 代码落点建议
-建议新增：
-- `_leader_relocked_edge_speed_release(...)`
+3. 不带 `--resume-from` 时必须精确退化
+- 若 CLI 未提供 `--resume-from`
+- 训练行为必须与当前版本精确一致
+- 不能改变现有 smoke / training 默认行为
 
-建议调用位置：
-- `_leader_staggered_hazard_speed_cap()` 最后得到 `staggered_cap` 后、`return` 前
+4. 周期性保存频率
+- 默认每 `1` 个 rollout 保存一次
+- 因当前 `steps_per_rollout = 512`
+- 所以崩溃 / 关机时最大损失步数必须 `< 512`
 
-建议复用已有几何激活：
-- `self._leader_relocked_edge_hold_activation(...)`
+5. 不改变 PPO 数学本体
+- checkpoint 只保存训练态
+- 不改 reward
+- 不改 controller
+- 不改 safety
+- 不改 `theta` 空间定义
 
-### 6.4 你必须马上补的测试
-在 `tests/test_adaptive_apf.py` 增加两类测试：
+### 4.3 需要新增的训练行为
 
-1. 正向激活测试
-- dual-blocker
-- `yield_left`
-- step 60 左右的 relocked edge-hold slice
-- 断言：
-  - 新 cap > 旧 `staggered_cap`
-  - 新 cap <= `base_target_speed`
-  - 新 cap <= 1.20
+- `scripts/train_rl_supervisor.py` 必须新增：
+  - `--resume-from`
+- 训练目录中必须周期性写出：
+  - `latest.pt`
+- 建议行为：
+  - 正式输出 `main.pt`
+  - 周期性覆盖 `latest.pt`
+  - 训练正常结束后，`main.pt` 仍作为最终 checkpoint
 
-2. 非激活退化测试
-- single-blocker 或 `a_hold == 0`
-- 断言新 cap == 旧 `staggered_cap`
+### 4.4 必须补的测试
 
-### 6.5 下一步验收门槛
-最小验收：
+在 `tests/test_rl_supervisor.py` 中新增 / 扩展测试，至少覆盖：
+
+1. 训练态保存测试
+- 一个短训练后能生成 `latest.pt`
+- checkpoint 中包含完整 resume 必需字段
+
+2. resume 等价性测试
+- 同 seed 下：
+  - 直接短训 `N` rollout
+  - 先训 `k` rollout 保存，再从 `latest.pt` resume 到 `N` rollout
+- 二者最终关键训练态必须对齐
+- 至少核对：
+  - `timesteps_done`
+  - network 参数
+  - optimizer 状态
+  - obs stats
+
+3. CLI 回归测试
+- 不带 `--resume-from` 时行为与旧版一致
+- 带 `--resume-from` 时可以继续推进 timesteps
+
+### 4.5 下一阶段验收门槛
+
+实现 resume 后，按以下顺序验收：
+
+1. `python -m pytest -q`
+2. `python -m compileall src tests scripts`
+3. 新的最小 smoke：
+  - 先生成 `latest.pt`
+  - 再从 `latest.pt` resume 一次
+  - 验证 checkpoint 会更新，timesteps 会继续推进
+4. 只有 resume 路径通过后，才重新发起 `200000` 步 CUDA 正式训练
+5. `main.pt` 真正生成后，再运行：
+  - `python scripts/benchmark_s5_rl.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --rl-checkpoint outputs/rl_train_s5_param_only/checkpoints/main.pt --exp-id-prefix s5_rl_stage1_cuda --deterministic-eval`
+
+阶段性成功判据仍是：
+
+- `seed 0/1/2` 至少一组 `leader_final_x` 优于 `no_rl`
+- `collision_count` 不回归
+- `boundary_violation_count` 不回归
+- 改进 seed 的 `fallback_events` 不恶化
+
+---
+
+## 5. 下次开机后的计划
+
+1. 不依赖本轮后台长训的任何进度
+- 默认视为 `main.pt` 不存在
+- 默认视为当前长训进度无效
+
+2. 第一件事不是重跑 `200000` 步
+- 先实现 `PPO checkpoint + resume`
+
+3. 写完后立刻做基础验证
 - `python -m pytest -q`
 - `python -m compileall src tests scripts`
-- 重新跑：
-  - `python scripts/run_experiment.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --exp-id <new_id>`
 
-阶段性成功判据：
-- `seed0` 的 `leader_final_x > 26.630563706474664`
-- `seed0` 的 `fallback_events <= 203`
-- 不出现 collision / boundary violation 回归
+4. 再做 resume smoke
+- 短训生成 `latest.pt`
+- 从 `latest.pt` 恢复一次
+- 确认 timesteps 继续增长
+- 确认 checkpoint 被刷新
 
-更高目标：
-- 任一 seed 达到 `leader_final_x > 35.0`
+5. resume 验证通过后，再重启正式训练
+- 用 CUDA
+- 用 `main.pt` 作为最终输出
+- 用 `latest.pt` 作为周期性恢复点
 
-终局目标仍然是：
-- `reached_goal = True`
+6. 正式训练结束后再做 benchmark
+- 对照 `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
+- 跑 `seed 0/1/2`
 
----
-
-## 7. 不要做的事
-- 不要改 `safety_filter.py / cbf.py / qp_solver.py`
-- 不要继续保留或恢复“额外 x-force 衰减”分支
-- 不要再走“更早 local flip / 更早 FSM relock”这条线
-- 不要直接硬改 `accel`
-- 不要写基于 mode 名字的场景特判
-- 不要降低 `safe_distance`
-- 不要放松 `barrier_decay`
-- 不要引入新依赖
-- 不要新开场景，集中火力只打 S5
+7. benchmark 通过后再决定是否扩到 `S4`
+- 在此之前，不允许扩到 `S4`
+- 在此之前，不允许多场景混训
 
 ---
 
-## 8. 关键文件索引
-- `src/apflf/controllers/adaptive_apf.py`
-  - 当前 nominal speed governor、lateral boost、steer bias 主文件
-- `src/apflf/controllers/apf_lf.py`
-  - 当前 relocked target_x hold / target_y edge-hold 主文件
-- `src/apflf/decision/fsm_mode.py`
-  - 当前 hazard-side relock hysteresis 优化
-- `tests/test_adaptive_apf.py`
-  - 当前 adaptive nominal 回归保护
-- `tests/test_modes.py`
-  - 当前 APF-LF / FSM 几何回归保护
+## 6. 不要做的事
+
+- 不要再把下一步写回 nominal governor release
+- 不要在没有 resume 的前提下继续硬跑 `200000` 步长训
+- 不要修改：
+  - `src/apflf/safety/safety_filter.py`
+  - `src/apflf/safety/cbf.py`
+  - `src/apflf/safety/qp_solver.py`
+- 不要把 RL 扩到：
+  - `mode-only`
+  - `full supervisor`
+- 不要现在扩到：
+  - `S4`
+  - 多场景混训
+- 不要改 `ModeDecision` 的字段形状
+- 不要改 `compute_actions(observation, mode, theta=None)` 的公共签名
 
 ---
 
-## 9. 一句话交接
-当前代码已经把 S5 问题从“safety 否决 nominal”推进到了“nominal governor 自己过于保守”。
-下一位工程师不要再碰 safety，也不要再碰 obstacle-force 特判；请直接在 `adaptive_apf.py` 里实现 **基于 relocked edge-hold activation 的 smooth governor release**。
+## 7. 一句话交接
+
+当前仓库已经从“是否引入 RL”推进到了“RL 第一阶段已接上、GPU smoke 已跑通”，但真正的工程阻塞点已经变成了“长时 PPO 训练无法跨关机恢复”。下一位工程师不要再回头修 nominal governor release，也不要碰 safety；请先把 `ppo.py + train_rl_supervisor.py + test_rl_supervisor.py` 的 `periodic checkpoint + rollout-boundary resume` 做完，再重启正式训练。
