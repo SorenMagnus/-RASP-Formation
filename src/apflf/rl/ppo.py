@@ -300,7 +300,7 @@ class PPOTrainer:
         if batch_steps is not None:
             message_parts.append(f"batch_steps={batch_steps}")
         if checkpoint_path is not None:
-            message_parts.append(f"checkpoint={Path(checkpoint_path).resolve()}")
+            message_parts.append(f"checkpoint={Path(checkpoint_path)}")
         if rollout_log is not None:
             message_parts.extend(
                 [
