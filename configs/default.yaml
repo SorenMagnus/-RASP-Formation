@@ -72,6 +72,19 @@ decision:
   stagnation_progress_threshold: 0.2
   stagnation_steps: 6
   recover_exit_steps: 4
+  rl:
+    reward:
+      progress_weight: 1.25
+      formation_weight: 0.15
+      intervention_weight: 0.10
+      qp_weight: 0.20
+      fallback_weight: 0.75
+      slack_weight: 0.10
+      theta_rate_weight: 0.02
+      goal_reward: 5.0
+      collision_penalty: 10.0
+      boundary_penalty: 8.0
+      correction_epsilon: 1e-6
 
 scenario:
   vehicle_count: 3

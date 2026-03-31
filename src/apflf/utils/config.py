@@ -20,6 +20,7 @@ from apflf.utils.types import (
     ProjectConfig,
     RoadConfig,
     RLDecisionConfig,
+    RLRewardConfig,
     RLThetaConfig,
     SafetyConfig,
     ScenarioConfig,
@@ -455,6 +456,53 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
 
     tau_enter = float(rl_raw.get("tau_enter", rl_raw.get("confidence_threshold", 0.55)))
     tau_exit = float(rl_raw.get("tau_exit", max(0.0, tau_enter - 0.10)))
+    reward_raw = _require_mapping(rl_raw.get("reward", {}), "decision.rl.reward")
+    reward_config = RLRewardConfig(
+        progress_weight=_require_non_negative(
+            float(reward_raw.get("progress_weight", 1.25)),
+            "decision.rl.reward.progress_weight",
+        ),
+        formation_weight=_require_non_negative(
+            float(reward_raw.get("formation_weight", 0.15)),
+            "decision.rl.reward.formation_weight",
+        ),
+        intervention_weight=_require_non_negative(
+            float(reward_raw.get("intervention_weight", 0.10)),
+            "decision.rl.reward.intervention_weight",
+        ),
+        qp_weight=_require_non_negative(
+            float(reward_raw.get("qp_weight", 0.20)),
+            "decision.rl.reward.qp_weight",
+        ),
+        fallback_weight=_require_non_negative(
+            float(reward_raw.get("fallback_weight", 0.75)),
+            "decision.rl.reward.fallback_weight",
+        ),
+        slack_weight=_require_non_negative(
+            float(reward_raw.get("slack_weight", 0.10)),
+            "decision.rl.reward.slack_weight",
+        ),
+        theta_rate_weight=_require_non_negative(
+            float(reward_raw.get("theta_rate_weight", 0.02)),
+            "decision.rl.reward.theta_rate_weight",
+        ),
+        goal_reward=_require_non_negative(
+            float(reward_raw.get("goal_reward", 5.0)),
+            "decision.rl.reward.goal_reward",
+        ),
+        collision_penalty=_require_non_negative(
+            float(reward_raw.get("collision_penalty", 10.0)),
+            "decision.rl.reward.collision_penalty",
+        ),
+        boundary_penalty=_require_non_negative(
+            float(reward_raw.get("boundary_penalty", 8.0)),
+            "decision.rl.reward.boundary_penalty",
+        ),
+        correction_epsilon=_require_non_negative(
+            float(reward_raw.get("correction_epsilon", 1e-6)),
+            "decision.rl.reward.correction_epsilon",
+        ),
+    )
 
     rl_config = RLDecisionConfig(
         checkpoint_path=str(rl_raw.get("checkpoint_path", "")),
@@ -481,6 +529,7 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
             rate_limit=theta_rate_limit,
             default=theta_default,
         ),
+        reward=reward_config,
     )
     if not 0.0 <= rl_config.confidence_threshold <= 1.0:
         raise ValueError("`decision.rl.confidence_threshold` must lie in [0, 1].")

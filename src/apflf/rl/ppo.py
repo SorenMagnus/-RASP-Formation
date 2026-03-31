@@ -307,11 +307,14 @@ class PPOTrainer:
                     f"policy_loss={rollout_log['policy_loss']:.6f}",
                     f"value_loss={rollout_log['value_loss']:.6f}",
                     f"entropy={rollout_log['entropy']:.6f}",
+                    f"reward_total_mean={rollout_log.get('reward_total_mean', 0.0):.6f}",
+                    f"qp_engagement_ratio_mean={rollout_log.get('qp_engagement_ratio_mean', 0.0):.6f}",
+                    f"fallback_ratio_mean={rollout_log.get('fallback_ratio_mean', 0.0):.6f}",
                 ]
             )
         print(" ".join(message_parts), flush=True)
 
-    def _collect_rollout(self, *, seed: int) -> dict[str, np.ndarray]:
+    def _collect_rollout(self, *, seed: int) -> dict[str, object]:
         observations: list[np.ndarray] = []
         normalized_observations: list[np.ndarray] = []
         action01s: list[np.ndarray] = []
@@ -319,6 +322,7 @@ class PPOTrainer:
         rewards: list[float] = []
         dones: list[float] = []
         values: list[float] = []
+        step_infos: list[dict[str, object]] = []
         obs = self.env.reset(seed=seed)
 
         for _ in range(self.config.steps_per_rollout):
@@ -330,7 +334,7 @@ class PPOTrainer:
                 action01 = distribution.sample()
                 log_prob = distribution.log_prob(action01).sum(dim=-1)
             theta = self._theta_from_unit_box(action01.squeeze(0).cpu().numpy())
-            next_obs, reward, terminated, truncated, _ = self.env.step(theta)
+            next_obs, reward, terminated, truncated, info = self.env.step(theta)
             done = bool(terminated or truncated)
 
             observations.append(np.asarray(obs, dtype=float))
@@ -340,6 +344,7 @@ class PPOTrainer:
             rewards.append(float(reward))
             dones.append(float(done))
             values.append(float(value.squeeze(0).cpu().item()))
+            step_infos.append(dict(info))
 
             obs = self.env.reset(seed=seed + len(observations)) if done else next_obs
 
@@ -354,6 +359,7 @@ class PPOTrainer:
             values=np.asarray(values, dtype=float),
             last_value=float(last_value.squeeze(0).cpu().item()),
         )
+        reward_array = np.asarray(rewards, dtype=float)
         return {
             "observations": np.asarray(observations, dtype=float),
             "normalized_observations": np.asarray(normalized_observations, dtype=float),
@@ -362,7 +368,55 @@ class PPOTrainer:
             "returns": returns,
             "advantages": advantages,
             "values": np.asarray(values, dtype=float),
+            "rollout_stats": self._summarize_rollout_infos(step_infos=step_infos, rewards=reward_array),
         }
+
+    def _summarize_rollout_infos(
+        self,
+        *,
+        step_infos: list[dict[str, object]],
+        rewards: np.ndarray,
+    ) -> dict[str, float]:
+        reward_key_map = {
+            "progress": "reward_progress_mean",
+            "formation": "reward_form_mean",
+            "intervene": "reward_intervene_mean",
+            "qp": "reward_qp_mean",
+            "fallback": "reward_fallback_mean",
+            "slack": "reward_slack_mean",
+            "theta_rate": "reward_theta_rate_mean",
+            "goal": "reward_goal_mean",
+            "collision": "reward_collision_mean",
+            "boundary": "reward_boundary_mean",
+        }
+        aggregates: dict[str, float] = {value: 0.0 for value in reward_key_map.values()}
+        aggregates.update(
+            {
+                "reward_total_mean": float(np.mean(rewards)) if rewards.size else 0.0,
+                "qp_engagement_ratio_mean": 0.0,
+                "fallback_ratio_mean": 0.0,
+                "theta_delta_linf_mean": 0.0,
+            }
+        )
+        if not step_infos:
+            return aggregates
+
+        for info in step_infos:
+            reward_terms = info.get("reward_terms", {})
+            if isinstance(reward_terms, dict):
+                for reward_key, aggregate_key in reward_key_map.items():
+                    aggregates[aggregate_key] += float(reward_terms.get(reward_key, 0.0))
+            aggregates["qp_engagement_ratio_mean"] += float(info.get("qp_engagement_ratio_step", 0.0))
+            aggregates["fallback_ratio_mean"] += float(info.get("fallback_ratio_step", 0.0))
+            aggregates["theta_delta_linf_mean"] += float(info.get("theta_delta_linf", 0.0))
+
+        step_count = float(len(step_infos))
+        for key in reward_key_map.values():
+            aggregates[key] /= step_count
+        aggregates["qp_engagement_ratio_mean"] /= step_count
+        aggregates["fallback_ratio_mean"] /= step_count
+        aggregates["theta_delta_linf_mean"] /= step_count
+        return aggregates
 
     def _theta_from_unit_box(self, action01: np.ndarray) -> tuple[float, float, float, float]:
         theta = np.asarray(self.theta_config.lower, dtype=float) + np.asarray(action01, dtype=float) * (
@@ -391,7 +445,8 @@ class PPOTrainer:
         advantages = (advantages - np.mean(advantages)) / max(np.std(advantages), 1e-6)
         return advantages.astype(float), returns.astype(float)
 
-    def _update(self, batch: dict[str, np.ndarray]) -> dict[str, float]:
+    def _update(self, batch: dict[str, object]) -> dict[str, float]:
+        rollout_stats = dict(batch.pop("rollout_stats", {}))
         observations = torch.as_tensor(batch["normalized_observations"], dtype=torch.float32, device=self.device)
         actions01 = torch.as_tensor(batch["action01s"], dtype=torch.float32, device=self.device)
         old_log_probs = torch.as_tensor(batch["log_probs"], dtype=torch.float32, device=self.device)
@@ -446,4 +501,5 @@ class PPOTrainer:
             "policy_loss": policy_loss_total / max(update_count, 1),
             "value_loss": value_loss_total / max(update_count, 1),
             "entropy": entropy_total / max(update_count, 1),
+            **rollout_stats,
         }

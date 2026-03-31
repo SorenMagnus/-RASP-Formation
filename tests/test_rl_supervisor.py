@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,12 +14,13 @@ import pytest
 from apflf.decision.fsm_mode import FSMModeDecision
 from apflf.decision.rl_mode import RLSupervisor
 from apflf.env.scenarios import ScenarioFactory
+from apflf.rl.env import SupervisorTrainingEnv
 from apflf.rl.policy import ObservationNormalizer, PolicyBundle, PolicyInference, torch
 from apflf.rl.ppo import PPOConfig, PPOTrainer
 from apflf.sim.replay import load_replay_bundle, read_summary_row
 from apflf.sim.runner import run_batch
 from apflf.utils.config import load_config
-from apflf.utils.types import ModeDecision, RLThetaConfig
+from apflf.utils.types import ModeDecision, Observation, RLThetaConfig, State
 
 
 class DummySequencePolicy:
@@ -57,18 +59,28 @@ class FakeTrainingEnv:
     def step(
         self,
         theta: tuple[float, float, float, float],
-    ) -> tuple[np.ndarray, float, bool, bool, dict[str, float]]:
-        reward = (
-            0.15 * self._step
-            + 0.30 * float(theta[0])
-            - 0.20 * float(theta[1])
-            + 0.10 * float(theta[2])
-            + 0.05 * float(theta[3])
-            + 0.01 * float(self._seed % 11)
-        )
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
+        reward_terms = {
+            "progress": 0.15 * self._step + 0.01 * float(self._seed % 11),
+            "formation": 0.30 * float(theta[0]),
+            "intervene": -0.20 * float(theta[1]),
+            "qp": -0.05 * float(self._step % 2),
+            "fallback": -0.10 * float((self._seed + self._step) % 2),
+            "slack": -0.01 * float(abs(theta[2])),
+            "theta_rate": -0.02 * float(abs(theta[3])),
+            "goal": 0.0,
+            "collision": 0.0,
+            "boundary": 0.0,
+        }
+        reward = float(sum(reward_terms.values()))
         self._step += 1
         terminated = self._step >= 4
-        return self._observation(), float(reward), terminated, False, {}
+        return self._observation(), float(reward), terminated, False, {
+            "reward_terms": reward_terms,
+            "qp_engagement_ratio_step": 0.5 * float(self._step % 2),
+            "fallback_ratio_step": 0.25 * float((self._seed + self._step) % 2),
+            "theta_delta_linf": float(np.max(np.abs(np.asarray(theta, dtype=float)))),
+        }
 
     def _observation(self) -> np.ndarray:
         seed_term = float((self._seed % 17) / 17.0)
@@ -162,6 +174,116 @@ def _make_fsm(config):
         vehicle_width=config.controller.vehicle_width,
         safe_distance=config.safety.safe_distance,
     )
+
+
+def test_supervisor_training_env_reward_uses_normalized_safety_terms() -> None:
+    config = _default_config()
+    env = SupervisorTrainingEnv(config=config)
+    env.reset(seed=0)
+    assert env._current_observation is not None
+    current_observation = env._current_observation
+    next_states = tuple(
+        State(
+            x=state.x + 1.0,
+            y=state.y,
+            yaw=state.yaw,
+            speed=state.speed,
+        )
+        for state in current_observation.states
+    )
+    next_observation = Observation(
+        step_index=current_observation.step_index + 1,
+        time=current_observation.time + config.simulation.dt,
+        states=next_states,
+        road=current_observation.road,
+        goal_x=current_observation.goal_x,
+        desired_offsets=current_observation.desired_offsets,
+        obstacles=current_observation.obstacles,
+    )
+    safety_safe = SimpleNamespace(
+        correction_norms=(1e-7, 0.0, 0.0),
+        slack_values=(0.0, 0.0, 0.0),
+        fallback_flags=(False, False, False),
+        qp_solve_times=(0.0, 0.0, 0.0),
+    )
+    safety_engaged = SimpleNamespace(
+        correction_norms=(1e-4, 0.0, 0.0),
+        slack_values=(0.2, 0.0, 0.0),
+        fallback_flags=(True, False, False),
+        qp_solve_times=(1.0, 0.0, 0.0),
+    )
+
+    safe_terms = env._reward_terms(
+        current_observation=current_observation,
+        next_observation=next_observation,
+        safety_result=safety_safe,
+        theta=config.decision.rl.theta.default,
+    )
+    engaged_terms = env._reward_terms(
+        current_observation=current_observation,
+        next_observation=next_observation,
+        safety_result=safety_engaged,
+        theta=(1.05, 1.0, 1.0, 0.0),
+    )
+
+    assert safe_terms["progress"] == pytest.approx(1.25)
+    assert safe_terms["formation"] == pytest.approx(0.0, abs=1e-9)
+    assert safe_terms["intervene"] == pytest.approx(0.0)
+    assert safe_terms["qp"] == pytest.approx(0.0)
+    assert safe_terms["fallback"] == pytest.approx(0.0)
+    assert engaged_terms["progress"] == pytest.approx(safe_terms["progress"])
+    assert engaged_terms["formation"] == pytest.approx(safe_terms["formation"], abs=1e-9)
+    assert engaged_terms["intervene"] == pytest.approx(-0.10)
+    assert engaged_terms["qp"] == pytest.approx(-0.20 / 3.0)
+    assert engaged_terms["fallback"] == pytest.approx(-0.75 / 3.0)
+    assert engaged_terms["slack"] == pytest.approx(-0.02)
+    assert engaged_terms["theta_rate"] == pytest.approx(-0.001)
+    assert sum(engaged_terms.values()) < sum(safe_terms.values())
+
+
+def test_supervisor_training_env_reward_adds_terminal_terms(monkeypatch) -> None:
+    config = _default_config()
+    env = SupervisorTrainingEnv(config=config)
+    env.reset(seed=0)
+    assert env._current_observation is not None
+    current_observation = env._current_observation
+    leader_shift = config.scenario.goal_x - current_observation.states[0].x
+    next_states = tuple(
+        State(
+            x=state.x + leader_shift,
+            y=state.y,
+            yaw=state.yaw,
+            speed=state.speed,
+        )
+        for state in current_observation.states
+    )
+    next_observation = Observation(
+        step_index=current_observation.step_index + 1,
+        time=current_observation.time + config.simulation.dt,
+        states=next_states,
+        road=current_observation.road,
+        goal_x=current_observation.goal_x,
+        desired_offsets=current_observation.desired_offsets,
+        obstacles=current_observation.obstacles,
+    )
+    monkeypatch.setattr(env, "_terminal_violations", lambda states, obstacles: (True, True))
+    safety_result = SimpleNamespace(
+        correction_norms=(0.0, 0.0, 0.0),
+        slack_values=(0.0, 0.0, 0.0),
+        fallback_flags=(False, False, False),
+        qp_solve_times=(0.0, 0.0, 0.0),
+    )
+
+    reward_terms = env._reward_terms(
+        current_observation=current_observation,
+        next_observation=next_observation,
+        safety_result=safety_result,
+        theta=config.decision.rl.theta.default,
+    )
+
+    assert reward_terms["goal"] == pytest.approx(config.decision.rl.reward.goal_reward)
+    assert reward_terms["collision"] == pytest.approx(-config.decision.rl.reward.collision_penalty)
+    assert reward_terms["boundary"] == pytest.approx(-config.decision.rl.reward.boundary_penalty)
 
 
 def test_torch_beta_policy_uses_variance_calibrated_confidence() -> None:
@@ -446,6 +568,33 @@ def test_ppo_trainer_checkpoint_payload_contains_resume_state(tmp_path: Path) ->
     assert payload["timesteps_done"] == 4
     assert payload["rollout_seed_next"] == 8
     assert payload["initial_seed"] == 7
+
+
+def test_ppo_trainer_logs_reward_diagnostics() -> None:
+    trainer = _make_fake_trainer(total_timesteps=4, steps_per_rollout=4)
+
+    logs = trainer.train(seed=7)
+
+    assert len(logs) == 1
+    rollout_log = logs[0]
+    for key in (
+        "reward_progress_mean",
+        "reward_form_mean",
+        "reward_intervene_mean",
+        "reward_qp_mean",
+        "reward_fallback_mean",
+        "reward_slack_mean",
+        "reward_theta_rate_mean",
+        "qp_engagement_ratio_mean",
+        "fallback_ratio_mean",
+        "theta_delta_linf_mean",
+    ):
+        assert key in rollout_log
+    assert rollout_log["reward_progress_mean"] > 0.0
+    assert rollout_log["reward_intervene_mean"] <= 0.0
+    assert rollout_log["qp_engagement_ratio_mean"] >= 0.0
+    assert rollout_log["fallback_ratio_mean"] >= 0.0
+    assert rollout_log["theta_delta_linf_mean"] > 0.0
 
 
 def test_ppo_trainer_resume_matches_uninterrupted_training(tmp_path: Path) -> None:

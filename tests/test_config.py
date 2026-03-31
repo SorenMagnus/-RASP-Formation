@@ -75,3 +75,44 @@ def test_load_config_accepts_resolved_export_shape(tmp_path: Path) -> None:
     assert math.isclose(config.safety.safe_distance, 0.75)
     assert math.isclose(config.safety.barrier_decay, 2.0)
     assert math.isclose(config.safety.slack_penalty, 900.0)
+
+
+def test_load_config_parses_rl_reward_weights(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = tmp_path / "reward_config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"extends: { (repo_root / 'configs' / 'default.yaml').as_posix() }",
+                "decision:",
+                "  rl:",
+                "    reward:",
+                "      progress_weight: 1.5",
+                "      formation_weight: 0.25",
+                "      intervention_weight: 0.3",
+                "      qp_weight: 0.4",
+                "      fallback_weight: 0.5",
+                "      slack_weight: 0.6",
+                "      theta_rate_weight: 0.07",
+                "      goal_reward: 6.0",
+                "      collision_penalty: 11.0",
+                "      boundary_penalty: 9.0",
+                "      correction_epsilon: 1e-5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert math.isclose(config.decision.rl.reward.progress_weight, 1.5)
+    assert math.isclose(config.decision.rl.reward.formation_weight, 0.25)
+    assert math.isclose(config.decision.rl.reward.intervention_weight, 0.3)
+    assert math.isclose(config.decision.rl.reward.qp_weight, 0.4)
+    assert math.isclose(config.decision.rl.reward.fallback_weight, 0.5)
+    assert math.isclose(config.decision.rl.reward.slack_weight, 0.6)
+    assert math.isclose(config.decision.rl.reward.theta_rate_weight, 0.07)
+    assert math.isclose(config.decision.rl.reward.goal_reward, 6.0)
+    assert math.isclose(config.decision.rl.reward.collision_penalty, 11.0)
+    assert math.isclose(config.decision.rl.reward.boundary_penalty, 9.0)
+    assert math.isclose(config.decision.rl.reward.correction_epsilon, 1e-5)

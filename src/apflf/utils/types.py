@@ -125,6 +125,23 @@ class RLThetaConfig:
 
 
 @dataclass(frozen=True)
+class RLRewardConfig:
+    """Reward weights for stage-1 param-only RL supervisor training."""
+
+    progress_weight: float = 1.25
+    formation_weight: float = 0.15
+    intervention_weight: float = 0.10
+    qp_weight: float = 0.20
+    fallback_weight: float = 0.75
+    slack_weight: float = 0.10
+    theta_rate_weight: float = 0.02
+    goal_reward: float = 5.0
+    collision_penalty: float = 10.0
+    boundary_penalty: float = 8.0
+    correction_epsilon: float = 1e-6
+
+
+@dataclass(frozen=True)
 class RLDecisionConfig:
     """Optional RL-supervisor settings attached to the decision layer."""
 
@@ -138,6 +155,7 @@ class RLDecisionConfig:
     observation_history: int = 5
     interaction_limit: int = 8
     theta: RLThetaConfig = field(default_factory=RLThetaConfig)
+    reward: RLRewardConfig = field(default_factory=RLRewardConfig)
 
 
 @dataclass(frozen=True)

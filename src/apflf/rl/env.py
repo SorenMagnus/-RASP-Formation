@@ -174,13 +174,29 @@ class SupervisorTrainingEnv:
         info = {
             "mode": self._current_mode,
             "reward_terms": reward_terms,
+            "reward_total": reward,
             "theta": projected_theta,
             "theta_delta": theta_delta,
+            "theta_delta_linf": float(np.max(np.abs(np.asarray(theta_delta, dtype=float)))),
             "collision": collision,
             "boundary_violation": boundary,
             "reached_goal": reached_goal,
             "fallback_events": int(np.count_nonzero(safety_result.fallback_flags)),
-            "safety_interventions": int(np.count_nonzero(np.asarray(safety_result.correction_norms) > 1e-6)),
+            "safety_interventions": int(
+                np.count_nonzero(
+                    np.asarray(safety_result.correction_norms, dtype=float)
+                    > self.config.decision.rl.reward.correction_epsilon
+                )
+            ),
+            "intervention_active_step": float(reward_terms["intervene"] < 0.0),
+            "qp_engagement_ratio_step": float(
+                np.mean(np.asarray(safety_result.qp_solve_times, dtype=float) > 0.0)
+            )
+            if safety_result.qp_solve_times
+            else 0.0,
+            "fallback_ratio_step": float(np.mean(np.asarray(safety_result.fallback_flags, dtype=float)))
+            if safety_result.fallback_flags
+            else 0.0,
         }
         return next_supervisor_observation, reward, terminated, truncated, info
 
@@ -218,27 +234,36 @@ class SupervisorTrainingEnv:
         safety_result,
         theta: tuple[float, float, float, float],
     ) -> dict[str, float]:
+        reward_config = self.config.decision.rl.reward
+        vehicle_count = max(len(current_observation.states), 1)
         progress = float(next_observation.states[0].x - current_observation.states[0].x)
         current_error = self._formation_error(current_observation)
         next_error = self._formation_error(next_observation)
         theta_delta = np.asarray(theta, dtype=float) - np.asarray(self._previous_theta, dtype=float)
+        theta_delta_linf = float(np.max(np.abs(theta_delta))) if theta_delta.size else 0.0
+        correction_norms = np.asarray(safety_result.correction_norms, dtype=float)
+        slack_values = np.asarray(safety_result.slack_values, dtype=float)
+        qp_solve_times = np.asarray(safety_result.qp_solve_times, dtype=float)
+        fallback_flags = np.asarray(safety_result.fallback_flags, dtype=bool)
+        intervention_active = float(
+            np.max(correction_norms) > reward_config.correction_epsilon if correction_norms.size else False
+        )
+        qp_engagement_ratio = float(np.mean(qp_solve_times > 0.0)) if qp_solve_times.size else 0.0
+        fallback_ratio = float(np.count_nonzero(fallback_flags) / vehicle_count) if fallback_flags.size else 0.0
+        max_slack = float(np.max(slack_values)) if slack_values.size else 0.0
         collision, boundary = self._terminal_violations(next_observation.states, next_observation.obstacles)
         reached_goal = next_observation.states[0].x >= self._scenario.goal_x - self.config.scenario.goal_tolerance
         return {
-            "progress": 1.25 * progress,
-            "time_penalty": -0.02,
-            "formation_recovery": 0.15 * (current_error - next_error),
-            "qp_correction_norm": -0.05 * float(np.mean(np.asarray(safety_result.correction_norms, dtype=float)))
-            if safety_result.correction_norms
-            else 0.0,
-            "slack": -0.10 * float(np.max(np.asarray(safety_result.slack_values, dtype=float)))
-            if safety_result.slack_values
-            else 0.0,
-            "fallback": -0.25 * float(np.count_nonzero(safety_result.fallback_flags)),
-            "theta_change_penalty": -0.02 * float(np.max(np.abs(theta_delta))),
-            "goal_terminal_reward": 5.0 if reached_goal else 0.0,
-            "collision_penalty": -10.0 if collision else 0.0,
-            "boundary_penalty": -8.0 if boundary else 0.0,
+            "progress": reward_config.progress_weight * progress,
+            "formation": reward_config.formation_weight * (current_error - next_error),
+            "intervene": -reward_config.intervention_weight * intervention_active,
+            "qp": -reward_config.qp_weight * qp_engagement_ratio,
+            "fallback": -reward_config.fallback_weight * fallback_ratio,
+            "slack": -reward_config.slack_weight * max_slack,
+            "theta_rate": -reward_config.theta_rate_weight * theta_delta_linf,
+            "goal": reward_config.goal_reward if reached_goal else 0.0,
+            "collision": -reward_config.collision_penalty if collision else 0.0,
+            "boundary": -reward_config.boundary_penalty if boundary else 0.0,
         }
 
     def _formation_error(self, observation: Observation) -> float:
