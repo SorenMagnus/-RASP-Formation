@@ -1,353 +1,411 @@
-# AI_MEMORY - 当前周期交接文档
+﻿# AI_MEMORY - 当前周期交接文档
 
-> 致下一位 AI / 工程师：
-> 请先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动手改代码。
-> 当前项目已经进入 `S5-only rl_param_only` 第一阶段。主阻塞点已经不是 nominal governor release，而是 RL 长训的稳定执行、checkpoint 落盘和后续 benchmark 闭环。
+> 下一个 AI / 工程师启动后，先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动代码。
+> 本文件已按 `2026-03-31` 的真实仓库状态重写。旧版 AI_MEMORY 中关于“`latest.pt` / `main.pt` 尚不存在、下一步先重新发起长训”的描述已经失效。
 
 ---
 
 ## 0. 当前开发游标
 
-- 当前扫描基线：
-  - `HEAD = 1ccb1132629bea5e0aff45d6069854cd655b50b3`
-  - 本次同步前，`git status --short` 显示未提交改动在：
-    - `src/apflf/rl/ppo.py`
-    - `tests/test_rl_supervisor.py`
-  - 这些改动对应的是：`progress logging` 补充与相关测试
+- 日期：
+  - `2026-03-31`
+- Git 游标：
+  - `HEAD = 8951c5db785ab2c6217abf387bfe154ef2961b02`
+  - `git status --short` 当前为空，工作树干净
 - 当前论文主线：
-  - 白盒主链仍是 `FSM -> nominal controller -> CBF-QP safety`
-  - RL 当前仅作为第一阶段 `param-only supervisor` 接入，不控制 `mode`，不控制 `accel/steer`
-- 当前有效成果：
-  - `outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
-  - `outputs/rl_train_s5_param_only/checkpoints/smoke.pt`
-  - `outputs/s5_rl_smoke_eval_cuda/summary.csv`
-  - `outputs/rl_resume_smoke/checkpoints/latest.pt`
-  - `outputs/rl_resume_smoke/checkpoints/main.pt`
-- 当前未完成成果：
-  - `outputs/rl_train_s5_param_only/checkpoints/main.pt` 仍不存在
-  - `outputs/rl_train_s5_param_only/checkpoints/latest.pt` 仍不存在
-  - 最近一次 `200000` 步 CUDA 长训在首个 rollout 保存点之前异常退出，因此没有留下可恢复进度
-- 当前真实阻塞：
-  - `checkpoint + resume` 已实现
-  - `progress logging` 已实现
-  - 下一步不再是继续写训练器功能，而是重新发起长训，确认首个 `latest.pt` 落盘，然后等待 `main.pt`
+  - 正文主方法已经重新锚定为白盒主链 `FSM + adaptive_apf + CBF-QP`
+  - `rl_param_only` 当前只保留为可选增强 / 附录分支，在它没有稳定优于 `no_rl` 之前，不进入正文主方法
+- 当前训练状态：
+  - `outputs/rl_train_s5_param_only/checkpoints/latest.pt` 已存在
+  - `outputs/rl_train_s5_param_only/checkpoints/main.pt` 已存在
+  - `outputs/rl_train_s5_param_only/logs/main_stdout.log` 已出现完整训练结束记录：
+    - `[ppo] complete device=cuda seed=0 timesteps_done=200192/200000 progress=100.00%`
+- 当前 S5 benchmark 的真实结论：
+  - 白盒 reference：`outputs/s5_rl_stage1_cuda__no_rl/summary.csv`
+  - RL 结果：`outputs/s5_rl_stage1_cuda__rl_param_only/summary.csv`
+  - `leader_final_x_delta_mean = -0.0503404628473092 m`
+  - 也就是说，现有 `rl_param_only` 在 `seed 0/1/2` 上没有稳定优于 `no_rl`
+  - 两边都保持 `collision_count = 0` 与 `boundary_violation_count = 0`
+- 当前 S5 RL 归因的真实结论：
+  - 归因结果目录：`outputs/s5_rl_stage1_cuda__rl_param_only/analysis/rl_attribution/`
+  - 聚合文件：`aggregate.json`
+  - 关键指标：
+    - `dominant_bottleneck = supervisor_gating`
+    - `rl_fallback_ratio_mean = 0.8136363636363636`
+    - `fallback_low_confidence_steps_mean = 173.33333333333334`
+    - `fallback_ood_steps_mean = 0.0`
+    - `theta_change_ratio_mean = 0.18636363636363637`
+    - `nominal_layer_changed_mean = 1.0`
+    - `safety_intervention_ratio_mean = 0.5287878787878788`
+- 当前阶段的直接判断：
+  - 主阻塞已经不是训练器基础设施
+  - 主阻塞也不是 OOD
+  - 当前最值得立刻动手的瓶颈，是 `rl_param_only` 的 `confidence gate` 过于保守，导致 RL 大部分时间被 `rl_fallback` 吞掉
 
 ---
 
-## 1. 技术栈红线
+## 1. 已完成工作
 
-### 1.1 架构红线
+### 1.1 论文主线与 artifact 入口已重新收口
+
+- `README.md`
+  - 已重写为当前真实项目状态
+  - 已修复旧文档链接
+  - 已加入 canonical paper matrix、offline RL attribution 的命令入口
+- `docs/reproducibility.md`
+  - 已补齐可复现实验矩阵与图表导出流程
+- `docs/development.md`
+  - 已同步当前分析层、归因层和验证约束
+
+### 1.2 论文复现实验入口已改为白盒主线优先
+
+- `scripts/reproduce_paper.py`
+  - `PRIMARY_METHOD = "no_rl"`
+  - 默认场景已扩成 `S1-S5`
+  - 默认方法集已收口到白盒主线 + baseline：
+    - `no_rl`
+    - `apf`
+    - `apf_lf`
+    - `st_apf`
+    - `dwa`
+    - `orca`
+  - 已新增 `--canonical-matrix`
+    - 作用：一键展开 `30 seeds + S1-S5 + baselines + all ablations`
+  - 结论：
+    - 论文主链现在可以先不依赖 RL，独立跑出 canonical matrix
+
+### 1.3 统计口径已升级为论文级默认配置
+
+- `src/apflf/analysis/stats.py`
+  - 已新增 `aggregate_metric_with_ci(...)`
+  - group summary 的默认置信区间方法已从 `t-interval` 切到 deterministic bootstrap
+  - 仍保留 `ci_method="t"` 的兼容能力
+  - pairwise comparison 仍保留：
+    - bootstrap delta CI
+    - Wilcoxon
+    - effect size
+
+### 1.4 导出层已升级到论文图表层
+
+- `scripts/export_figures.py`
+  - reference method 默认值已统一成 `no_rl`
+- `src/apflf/analysis/export.py`
+  - 主表已纳入 comfort / runtime 指标：
+    - `longitudinal_jerk_rms`
+    - `steer_rate_rms`
+    - `mean_step_runtime_ms`
+    - `qp_solve_time_mean_ms`
+  - 已补齐论文图表导出：
+    - `trajectory_overview.pdf`
+    - `risk_clearance_timeseries.pdf`
+    - `qp_correction_timeline.pdf`
+    - `mode_timeline.pdf`
+    - `runtime_histogram.pdf`
+    - `failure_case_panel.pdf`
+  - 旧版总览图仍保留：
+    - `metric_overview.pdf`
+    - `safety_efficiency_tradeoff.pdf`
+
+### 1.5 S5 RL 误差归因链路已落地
+
+- 新增 `src/apflf/analysis/rl_attribution.py`
+  - 已能对单个 seed 归因：
+    - RL active / fallback 比例
+    - 低置信度 fallback 次数
+    - OOD fallback 次数
+    - theta 变化比例
+    - theta clipping 比例
+    - safety intervention / safety fallback / QP engagement 比例
+    - dominant bottleneck 判定
+  - 已能与白盒 reference 回放进行逐 seed 对比：
+    - `leader_target_speed_delta_abs_mean`
+    - `leader_force_total_delta_norm_mean`
+    - nominal / safe accel, steer 差异
+    - `mode_mismatch_ratio`
+    - `nominal_layer_changed`
+- 新增 `scripts/analyze_s5_rl_attribution.py`
+  - 已能从现有 benchmark 输出自动生成：
+    - `seed_attribution.csv`
+    - `aggregate.json`
+    - `attribution_overview.pdf`
+
+### 1.6 当前真实实验结果已确认
+
+- 训练完成：
+  - `outputs/rl_train_s5_param_only/checkpoints/main.pt`
+  - `outputs/rl_train_s5_param_only/checkpoints/latest.pt`
+- S5 benchmark 已存在：
+  - `outputs/s5_rl_stage1_cuda__no_rl/summary.csv`
+  - `outputs/s5_rl_stage1_cuda__rl_param_only/summary.csv`
+- RL 归因结果已存在：
+  - `outputs/s5_rl_stage1_cuda__rl_param_only/analysis/rl_attribution/aggregate.json`
+- 当前 `main_stderr.log` 仍显示较多 safety fallback / solver 告警：
+  - `preview_violation_after_qp`
+  - `solver_status=maximum iterations reached`
+  - `solver_status=primal infeasible`
+
+### 1.7 当前验证状态
+
+- 本周期已重新验证：
+  - `python -m compileall src tests scripts` 通过
+  - `python -m pytest -q tests/test_stats_export.py::test_export_paper_artifacts_writes_tables_and_figures tests/test_rl_attribution.py::test_analyze_s5_rl_attribution_script_writes_outputs` 通过
+- 说明：
+  - 本周期我没有再次完整跑完全量 `pytest`
+  - 但本轮新增的 paper export 与 RL attribution 关键路径已经重新验证可用
+
+---
+
+## 2. 当前研究结论
+
+- 当前仓库已经不是“缺实验脚手架”
+  - 而是“工程闭环已成型，论文闭环还没有完全收口”
+- 白盒主链已经足够支持正文：
+  - `FSM + adaptive_apf + CBF-QP`
+- RL 当前不应主导论文叙事：
+  - 现有 `rl_param_only` 没有稳定优于 `no_rl`
+  - 真实瓶颈是 `supervisor_gating`
+  - 不是 OOD
+  - 不是缺 checkpoint
+  - 也不是 RL 完全没有影响 nominal controller
+- 因此下一步不应该先去做大规模 RL 长训
+  - 更不应该先跑昂贵的 `30 seeds` RL sweep
+  - 应该先修正 `confidence gate` / `confidence calibration`
+
+---
+
+## 3. 下一步指令
+
+### 3.1 第一优先级
+
+下一个工程师启动 AI 后，第一件事不是重新训练，也不是继续改导出层，而是立刻写 `RL 置信度校准 + 滞回门控` 代码。
+
+### 3.2 必须修改的文件
+
+- `src/apflf/rl/policy.py`
+- `src/apflf/decision/rl_mode.py`
+- `src/apflf/utils/types.py`
+- `tests/test_rl_supervisor.py`
+- `tests/test_rl_attribution.py`
+
+### 3.3 立刻要写的代码与数学约束
+
+#### A. 在 `src/apflf/rl/policy.py` 中，重写 `TorchBetaPolicy.infer()` 的 confidence 定义
+
+不要再把当前 entropy-based confidence 直接当成最终 gate 置信度。
+
+请改成基于 Beta 分布方差的校准置信度。对每个动作维度 `i`，若策略输出的 Beta 参数为 `alpha_i, beta_i`，则定义：
+
+```text
+var_i = alpha_i * beta_i / ((alpha_i + beta_i)^2 * (alpha_i + beta_i + 1))
+```
+
+令：
+
+```text
+v_uniform = 1 / 12
+confidence_raw = clip(1 - mean_i(var_i) / v_uniform, 0, 1)
+```
+
+这里 `v_uniform = 1/12` 是 `Beta(1, 1)` 的方差，要求它对应“零置信度基线”。
+
+必须满足：
+
+- `confidence_raw ∈ [0, 1]`
+- 当分布越集中时，`confidence_raw` 单调不减
+- 当分布接近 `Beta(1,1)` 时，`confidence_raw` 应接近 `0`
+
+#### B. 在 `src/apflf/decision/rl_mode.py` 中，实现两阈值滞回门控
+
+新增两个阈值：
+
+- `tau_enter`
+- `tau_exit`
+
+要求严格满足：
+
+```text
+0 <= tau_exit < tau_enter <= 1
+```
+
+门控规则必须写成：
+
+```text
+若 ||z_t||_inf > ood_threshold，则强制 fallback
+
+否则：
+  - 如果上一步没有接受 RL，则仅当 confidence_raw >= tau_enter 时接受 RL
+  - 如果上一步已经接受 RL，则当 confidence_raw >= tau_exit 时继续保持 RL
+  - 其余情况一律 fallback 到 FSM
+```
+
+其中 `z_t` 是 normalized observation，`||z_t||_inf` 是其无穷范数。
+
+#### C. 必须保持的硬约束
+
+不管怎么改 gate，以下数学约束不能破：
+
+```text
+theta_lower[j] <= theta_t[j] <= theta_upper[j]
+|theta_t[j] - theta_{t-1}[j]| <= rate_limit[j]
+```
+
+并且：
+
+- `mode_t` 仍然必须来自 FSM，不允许 RL 直接改 mode
+- RL 仍然只允许输出 `theta`
+- 不允许 RL 直接输出 `accel`
+- 不允许 RL 直接输出 `steer`
+- gate 拒绝时，必须 exact fallback 到白盒 decision：
+  - `mode = fallback_decision.mode`
+  - `theta = fallback_decision.theta`
+  - `source = "rl_fallback"`
+
+#### D. 强烈建议顺手补的诊断字段
+
+在不改 `ModeDecision` 结构的前提下，优先给 `DecisionDiagnostics` 增补如下字段：
+
+- `confidence_raw`
+- `gate_open`
+- `gate_reason`
+
+目的：
+
+- 下一个 benchmark 周期要能区分“raw confidence 低”与“滞回后仍被关掉”
+- 不能只看 `confidence` 一个标量继续猜
+
+### 3.4 为什么下一步必须是这段代码
+
+因为当前真实归因已经说明：
+
+- `fallback_ood_steps_mean = 0.0`
+- `fallback_low_confidence_steps_mean = 173.33333333333334`
+- `rl_fallback_ratio_mean = 0.8136363636363636`
+- `theta_change_ratio_mean = 0.18636363636363637`
+- `nominal_layer_changed_mean = 1.0`
+
+这说明：
+
+- OOD 不是主因
+- RL 不是完全没产生 nominal 影响
+- 真正卡住的是 confidence gate 太保守
+
+所以现在最合理的工程动作，是先修 gate，而不是盲目继续长训
+
+### 3.5 写完这段代码后的立即验收
+
+先不要重训。
+
+先直接用现有 `main.pt` 做 gatefix 后的 deterministic benchmark：
+
+```bash
+python scripts/benchmark_s5_rl.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --rl-checkpoint outputs/rl_train_s5_param_only/checkpoints/main.pt --exp-id-prefix s5_rl_gatefix_eval --deterministic-eval
+```
+
+然后立刻做归因：
+
+```bash
+python scripts/analyze_s5_rl_attribution.py --rl-run-dir outputs/s5_rl_gatefix_eval__rl_param_only --reference-run-dir outputs/s5_rl_stage1_cuda__no_rl --as-json
+```
+
+验收标准：
+
+- `collision_count` 总和必须保持 `0`
+- `boundary_violation_count` 总和必须保持 `0`
+- `rl_fallback_ratio_mean` 必须严格小于 `0.8136363636363636`
+- `rl_active_ratio_mean` 必须严格大于 `0.18636363636363637`
+- `leader_final_x_delta_mean` 不能比当前的 `-0.0503404628473092` 更差
+
+只有在 gatefix 后仍然无法改善这些指标，才允许讨论重新训练或改 reward。
+
+---
+
+## 4. Gatefix 之后的第二优先级
+
+只有当 `RL gatefix` 完成并通过上面的 safety + attribution 验收后，才进入下一阶段：
+
+### 4.1 白盒 canonical paper matrix
+
+```bash
+python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix
+```
+
+### 4.2 论文图表重新导出
+
+```bash
+python scripts/export_figures.py --input-dir outputs/paper_canonical
+```
+
+### 4.3 RL 是否升级为正文内容的判据
+
+只有在新增结果同时满足以下条件时，才允许把 RL 从附录候选升级为正文内容：
+
+- 相对 `no_rl` 有清晰正向改进
+- `collision_count` 不回归
+- `boundary_violation_count` 不回归
+- 归因上不再呈现 `supervisor_gating` 主导
+
+---
+
+## 5. 技术栈红线
+
+### 5.1 架构红线
 
 - 必须保持三层白盒闭环：
   - `Mode Decision -> Nominal Controller -> Safety Filter`
-- 严禁修改以下安全层核心文件：
-  - `src/apflf/safety/safety_filter.py`
-  - `src/apflf/safety/cbf.py`
-  - `src/apflf/safety/qp_solver.py`
-- RL 当前只允许 `param-only supervisor`：
-  - 不允许直接控制 `mode`
-  - 不允许直接输出 `accel`
-  - 不允许直接输出 `steer`
-- 不允许把论文主线改写成端到端 RL / 黑盒策略 / ROS 重构 / CUDA 重写
-- 不允许引入 `SB3`；当前 PPO 后端必须继续沿用仓库内自定义 Torch 实现
+- 白盒正文主线不能改写成端到端黑盒 RL
+- 当前 RL 只能是 `param-only supervisor`
 
-### 1.2 接口红线
+### 5.2 安全层红线
 
-- 决策层公共接口已经冻结为：
-  - `ModeDecision(mode, theta, source, confidence)`
-- controller 公共入口已经冻结为：
-  - `compute_actions(observation, mode, theta=None)`
-- 必须保持：
-  - `theta=None` 时精确退化到当前白盒基线
-  - FSM 和 RL supervisor 共用同一 `ModeDecision` 输出形状
+严禁修改以下文件：
 
-### 1.3 工程红线
+- `src/apflf/safety/safety_filter.py`
+- `src/apflf/safety/cbf.py`
+- `src/apflf/safety/qp_solver.py`
 
-- 每次改动后必须运行：
-  - `python -m pytest -q`
+### 5.3 接口红线
+
+严禁破坏以下公共接口与数据结构：
+
+- `ModeDecision(mode, theta, source, confidence)`
+- `compute_actions(observation, mode, theta=None)`
+
+必须保持：
+
+- `theta=None` 时精确退化到白盒基线
+- FSM 与 RL supervisor 共用同一 `ModeDecision` 输出形状
+
+### 5.4 RL 红线
+
+- 不允许把 RL 扩成 `mode-only`
+- 不允许把 RL 扩成 `full supervisor`
+- 不允许 RL 直接输出 `mode`
+- 不允许 RL 直接输出 `accel`
+- 不允许 RL 直接输出 `steer`
+
+### 5.5 工程红线
+
+- 不允许引入 `SB3`
+- PPO 后端必须继续沿用仓库内自定义 Torch 实现
+- 所有实验必须保持 deterministic seeds
+- 每次改动后至少执行：
   - `python -m compileall src tests scripts`
-- 所有实验必须可复现，seed 不能漂
-- 长训只能在已经支持 `latest.pt` 周期保存和 `--resume-from` 的前提下运行
-
----
-
-## 2. 已完成工作
-
-### 2.1 决策层
-
-- 已统一决策接口：
-  - `src/apflf/utils/types.py` 中已有 `ModeDecision(mode, theta, source, confidence)`
-- FSM 已接入统一接口：
-  - `src/apflf/decision/fsm_mode.py` 返回 `ModeDecision`
-  - FSM 默认输出确定性 `theta`
-- RL supervisor 已落地：
-  - `src/apflf/decision/rl_mode.py`
-  - 已具备 fallback FSM、theta 投影、rate-limit、confidence gate、OOD gate
-
-### 2.2 控制层
-
-- controller 入口已统一为：
-  - `compute_actions(observation, mode, theta=None)`
-- 当前 RL 只通过 `theta` 调度 nominal 层的有界参数：
-  - 不直接改 `accel`
-  - 不直接改 `steer`
-- 这条链路已在 controller / world / runner 中打通
-
-### 2.3 RL 基础设施
-
-- 以下 RL 文件已经在树上，且可导入、可运行：
-  - `src/apflf/decision/rl_mode.py`
-  - `src/apflf/rl/features.py`
-  - `src/apflf/rl/env.py`
-  - `src/apflf/rl/policy.py`
-  - `src/apflf/rl/ppo.py`
-  - `scripts/train_rl_supervisor.py`
-  - `scripts/benchmark_s5_rl.py`
-  - `tests/test_rl_supervisor.py`
-- 当前 Torch GPU 环境已可用：
-  - `torch 2.5.1+cu121`
-  - CUDA 可见
-
-### 2.4 Checkpoint / Resume
-
-- `PPOTrainer` 已支持：
-  - 每个完整 rollout + PPO update 后保存 `latest.pt`
-  - 从 `--resume-from` 在 rollout 边界恢复
-- 训练态已写入 richer checkpoint payload，包括：
-  - `optimizer_state_dict`
-  - `obs_stats_count`
-  - `obs_stats_mean`
-  - `obs_stats_m2`
-  - `timesteps_done`
-  - `rollout_seed_next`
-  - `initial_seed`
-  - `numpy_rng_state`
-  - `torch_cpu_rng_state`
-  - `torch_cuda_rng_state_all`
-  - `trainer_config`
-- 保存方式已使用“临时文件 + 原子替换”，避免 `latest.pt` 被半写坏
-- 推理兼容性保持不变：
-  - `main.pt` / `latest.pt` 仍包含原推理所需字段
-  - `policy.py` 无需修改即可加载推理所需内容
-
-### 2.5 Progress Logging
-
-- 训练器已支持 `stdout` 进度打印，并且每条都 `flush=True`
-- 当前会打印的事件：
-  - `[ppo] start`
-  - `[ppo] resume`
-  - `[ppo] rollout_start`
-  - `[ppo] rollout_done`
-  - `[ppo] complete`
-- 每条日志包含的关键信息：
-  - `device`
-  - `seed`
-  - `timesteps_done=current/total`
-  - `progress=...%`
-  - `elapsed_s`
-  - `rollout_index`
-  - `rollout_seed`
-  - `batch_steps`
-  - `policy_loss`
-  - `value_loss`
-  - `entropy`
-  - `checkpoint=...`（在 rollout 保存后打印）
-- 因此后台训练时，应优先查看：
-  - `outputs/rl_train_s5_param_only/logs/main_stdout.log`
-- safety fallback 仍会继续进入：
-  - `outputs/rl_train_s5_param_only/logs/main_stderr.log`
-
-### 2.6 诊断与产物
-
-- summary / traj artifact 已持久化 RL 诊断字段，包括：
-  - `rl_fallback_count`
-  - `rl_confidence_mean`
-  - `rl_confidence_min`
-  - `theta_delta_linf_mean`
-  - `theta_delta_linf_max`
-  - `theta_clip_events`
-- traj 中已落盘：
-  - `decision_sources`
-  - `decision_thetas`
-  - `decision_theta_deltas`
-  - `decision_confidences`
-  - `decision_rl_fallbacks`
-  - `decision_theta_clipped`
-
-### 2.7 验证结果
-
-- 当前验证结果：
-  - `python -m pytest -q` -> `109 passed`
-  - `python -m compileall src tests scripts` -> 通过
-- `no_rl` 基线已冻结：
-  - 文件：`outputs/s5_rl_stage1_baseline__no_rl/summary.csv`
-  - `seed0 leader_final_x = 26.634774055574823`
-  - `fallback_events = 203`
-  - `safety_interventions = 238`
-  - `collision_count = 0`
-  - `boundary_violation_count = 0`
-- `500` 步 CUDA smoke 已成功：
-  - checkpoint：`outputs/rl_train_s5_param_only/checkpoints/smoke.pt`
-  - eval：`outputs/s5_rl_smoke_eval_cuda/summary.csv`
-  - `leader_final_x = 26.634774055574823`
-  - `fallback_events = 203`
-  - `collision_count = 0`
-  - `boundary_violation_count = 0`
-- `resume smoke` 已成功：
-  - 路径：`outputs/rl_resume_smoke/checkpoints/`
-  - 首次短训可生成 `latest.pt`
-  - 从 `latest.pt` 恢复后可把 `timesteps_done` 从 `4` 续到 `8`
-- smoke eval 中 RL 字段有效，但这只是链路验证，不是性能突破：
-  - `rl_fallback_count = 220`
-  - `rl_confidence_mean = 0.08346643664620139`
-  - `theta_clip_events = 220`
-
----
-
-## 3. 当前真实实验状态
-
-- 当前 S5 论文级主问题还没有被 RL 打穿
-- 当前能确认的只有：
-  - RL 路径已接上
-  - GPU smoke 训练可跑
-  - checkpoint / resume 路径可跑
-  - progress logging 已可见
-  - smoke eval 无碰撞/越界回归
-- 当前还不能确认：
-  - `rl_param_only` 是否能在 `seed 0/1/2` 上优于 `no_rl`
-- 当前长训状态：
-  - 最近一次 `200000` 步 CUDA 长训已异常退出
-  - 首个 rollout 完成前未生成 `latest.pt`
-  - 因此没有可恢复的长训进度
-- 这意味着：
-  - 现在不是继续写训练器功能
-  - 而是重新发起长训，并利用新的 progress logging 观察它是否成功跨过首个 rollout 保存点
-
----
-
-## 4. 下一步指令
-
-### 4.1 下一个工程师启动后，第一件事要做什么
-
-不要再继续改 `checkpoint + resume` 代码。  
-请直接重新发起 `S5-only rl_param_only` 的 `200000` 步 CUDA 长训：
-
-```bash
-python scripts/train_rl_supervisor.py --config configs/scenarios/s5_dense_multi_agent.yaml --seed 0 --total-timesteps 200000 --steps-per-rollout 512 --learning-rate 3e-4 --device cuda --output outputs/rl_train_s5_param_only/checkpoints/main.pt
-```
-
-### 4.2 第一阶段运行验收
-
-重新启动长训后，优先盯以下两处：
-
-1. `main_stdout.log`
-- 命令：
-```powershell
-Get-Content outputs/rl_train_s5_param_only/logs/main_stdout.log -Wait
-```
-- 预期能看到：
-  - `[ppo] start`
-  - `[ppo] rollout_start`
-  - `[ppo] rollout_done ... checkpoint=...latest.pt`
-
-2. `latest.pt`
-- 命令：
-```powershell
-Test-Path outputs/rl_train_s5_param_only/checkpoints/latest.pt
-```
-- 一旦返回 `True`，说明首个可恢复保存点已建立
-
-### 4.3 如果需要关机，如何回档
-
-只有当下面文件存在时，才允许放心关机：
-
-- `outputs/rl_train_s5_param_only/checkpoints/latest.pt`
-
-下次开机后，必须用这个命令续跑：
-
-```bash
-python scripts/train_rl_supervisor.py --config configs/scenarios/s5_dense_multi_agent.yaml --seed 0 --total-timesteps 200000 --steps-per-rollout 512 --learning-rate 3e-4 --device cuda --resume-from outputs/rl_train_s5_param_only/checkpoints/latest.pt --output outputs/rl_train_s5_param_only/checkpoints/main.pt
-```
-
-注意：
-
-- 不要用旧的 `smoke.pt` 续跑长训
-- 长训回档点必须是 `latest.pt`
-
-### 4.4 如果长训再次异常退出
-
-不要立刻重写控制器或 safety。  
-先做最小排查：
-
-1. 看 `main_stdout.log`
-- 确认是否至少打印到了 `[ppo] rollout_start`
-
-2. 看 `main_stderr.log`
-- 确认是否只有 fallback 输出
-- 还是出现了 Python traceback / OOM / CUDA error
-
-3. 看 `latest.pt` 是否存在
-- 若不存在，说明仍死在首个 rollout 保存点之前
-- 此时下一步应该补“异常 traceback 输出 / 首轮 heartbeat 更细粒度日志”，而不是改论文算法
-
-### 4.5 长训完成后的实验闭环
-
-只有 `main.pt` 真正生成后，才运行：
-
-```bash
-python scripts/benchmark_s5_rl.py --config configs/scenarios/s5_dense_multi_agent.yaml --seeds 0 1 2 --rl-checkpoint outputs/rl_train_s5_param_only/checkpoints/main.pt --exp-id-prefix s5_rl_stage1_cuda --deterministic-eval
-```
-
-阶段性成功判据仍是：
-
-- `seed 0/1/2` 至少一组 `leader_final_x` 优于 `no_rl`
-- `collision_count` 不回归
-- `boundary_violation_count` 不回归
-- 改进 seed 的 `fallback_events` 不恶化
-
----
-
-## 5. 下次开机后的计划
-
-1. 先确认当前长训是否仍在运行
-- 若没有运行，则直接重新发起长训
-
-2. 发起长训后立刻观察 `stdout`
-- 用 `main_stdout.log` 看 `[ppo] start / rollout_start / rollout_done`
-
-3. 首个关键目标不是 `main.pt`
-- 而是先看到 `latest.pt` 成功落盘
-
-4. 一旦 `latest.pt` 出现
-- 以后就允许关机
-- 以后就允许用 `--resume-from latest.pt` 续跑
-
-5. 只有 `main.pt` 生成后，才进入 benchmark
-
-6. benchmark 通过前，不允许扩到 `S4`
+  - 相关增量 `pytest`
 
 ---
 
 ## 6. 不要做的事
 
-- 不要再把下一步写回 nominal governor release
-- 不要再回头重复实现 `checkpoint + resume`
-- 不要修改：
-  - `src/apflf/safety/safety_filter.py`
-  - `src/apflf/safety/cbf.py`
-  - `src/apflf/safety/qp_solver.py`
-- 不要把 RL 扩到：
-  - `mode-only`
-  - `full supervisor`
-- 不要现在扩到：
-  - `S4`
-  - 多场景混训
-- 不要改 `ModeDecision` 的字段形状
-- 不要改 `compute_actions(observation, mode, theta=None)` 的公共签名
-- 不要用 `smoke.pt` 当长训恢复点
+- 不要再把下一步写成“先重新发起 200000 步长训”
+- 不要在没有修 gate 的前提下先跑大规模 RL sweep
+- 不要回头重写 export / stats / reproducibility 这条链路
+- 不要把当前问题误判成 OOD
+- 不要为了追求 RL 提升去动 safety red-line 文件
+- 不要修改 `ModeDecision` 结构
+- 不要修改 `compute_actions(observation, mode, theta=None)` 公共签名
 
 ---
 
 ## 7. 一句话交接
 
-当前仓库已经从“是否引入 RL”推进到了“RL 第一阶段已接上、checkpoint + resume 已实现、progress logging 已实现”。下一个工程师不要再回头修 governor release，也不要碰 safety；请直接重新发起 `200000` 步 CUDA 长训，盯住 `main_stdout.log` 与 `latest.pt`，先确保首个可恢复保存点建立，再等待 `main.pt` 和后续 benchmark。
+当前仓库已经完成了白盒论文主线收口、统计与图表导出升级、以及 S5 `rl_param_only` 的离线误差归因；真实数据表明当前 RL 的首要瓶颈是 `supervisor_gating` 而不是 OOD 或训练器缺陷。下一个工程师启动后，应该立刻去写 `Beta 方差置信度 + 两阈值滞回门控`，并在不改 safety red-line、不改 `ModeDecision`、不改 `compute_actions` 的前提下，用现有 `main.pt` 先做 gatefix benchmark，再决定是否需要重训。
