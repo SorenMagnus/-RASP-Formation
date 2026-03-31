@@ -94,18 +94,54 @@ def aggregate_metric(values: np.ndarray, confidence: float = 0.95) -> MetricAggr
     if values.size == 1:
         return MetricAggregate(1, mean, 0.0, mean, mean)
 
+    return aggregate_metric_with_ci(
+        values,
+        confidence=confidence,
+        ci_method="bootstrap",
+    )
+
+
+def aggregate_metric_with_ci(
+    values: np.ndarray,
+    *,
+    confidence: float = 0.95,
+    ci_method: str = "bootstrap",
+    num_resamples: int = 2000,
+    seed: int = 0,
+) -> MetricAggregate:
+    """Aggregate repeated-seed metric values with a deterministic CI estimator."""
+
+    if values.size == 0:
+        return MetricAggregate(0, float("nan"), float("nan"), float("nan"), float("nan"))
+    mean = float(np.mean(values))
+    if values.size == 1:
+        return MetricAggregate(1, mean, 0.0, mean, mean)
+
     std = float(np.std(values, ddof=1))
     if std <= 1e-12:
         return MetricAggregate(int(values.size), mean, 0.0, mean, mean)
-    sem = std / math.sqrt(values.size)
-    interval = scipy_stats.t.interval(
-        confidence,
-        df=values.size - 1,
-        loc=mean,
-        scale=sem,
-    )
-    ci_low, ci_high = (float(interval[0]), float(interval[1]))
-    return MetricAggregate(values.size, mean, std, ci_low, ci_high)
+
+    if ci_method == "t":
+        sem = std / math.sqrt(values.size)
+        interval = scipy_stats.t.interval(
+            confidence,
+            df=values.size - 1,
+            loc=mean,
+            scale=sem,
+        )
+        ci_low, ci_high = (float(interval[0]), float(interval[1]))
+        return MetricAggregate(values.size, mean, std, ci_low, ci_high)
+
+    if ci_method == "bootstrap":
+        ci_low, ci_high = _bootstrap_mean_ci(
+            values,
+            confidence=confidence,
+            num_resamples=num_resamples,
+            seed=seed,
+        )
+        return MetricAggregate(values.size, mean, std, ci_low, ci_high)
+
+    raise ValueError(f"Unsupported CI method: {ci_method}")
 
 
 def summarize_experiments(
@@ -113,6 +149,9 @@ def summarize_experiments(
     *,
     group_keys: tuple[str, ...] = ("scenario", "method"),
     metrics: tuple[str, ...] = DEFAULT_METRICS,
+    ci_method: str = "bootstrap",
+    num_resamples: int = 2000,
+    seed: int = 0,
 ) -> list[dict[str, object]]:
     """Summarize repeated-seed experiments into one wide row per group."""
 
@@ -122,11 +161,16 @@ def summarize_experiments(
         grouped.setdefault(group, []).append(row)
 
     summary_rows: list[dict[str, object]] = []
-    for group, group_rows in sorted(grouped.items(), key=lambda item: item[0]):
+    for group_index, (group, group_rows) in enumerate(sorted(grouped.items(), key=lambda item: item[0])):
         summary_row = {key: value for key, value in zip(group_keys, group, strict=True)}
         summary_row["n"] = len(group_rows)
-        for metric in metrics:
-            aggregate = aggregate_metric(_metric_values(group_rows, metric))
+        for metric_index, metric in enumerate(metrics):
+            aggregate = aggregate_metric_with_ci(
+                _metric_values(group_rows, metric),
+                ci_method=ci_method,
+                num_resamples=num_resamples,
+                seed=seed + group_index * 1000 + metric_index,
+            )
             summary_row[f"{metric}_mean"] = aggregate.mean
             summary_row[f"{metric}_std"] = aggregate.std
             summary_row[f"{metric}_ci_low"] = aggregate.ci_low

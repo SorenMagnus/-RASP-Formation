@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-dir", required=True, help="Directory produced by scripts/reproduce_paper.py.")
     parser.add_argument(
         "--reference-method",
-        default="adaptive_apf",
+        default="no_rl",
         help="Reference method used for pairwise comparison tables.",
     )
     return parser

@@ -42,4 +42,4 @@ The CI workflow runs:
 
 ## Research notes
 
-The remaining open work is mostly method tuning and larger experiment sweeps. Infrastructure items such as replay, matrix execution, export, and regression testing are already in place.
+The remaining open work is mostly paper-grade evidence closure. Infrastructure items such as replay, matrix execution, richer export, offline RL attribution, and regression testing are already in place.

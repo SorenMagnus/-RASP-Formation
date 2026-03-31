@@ -31,6 +31,17 @@ from apflf.sim.runner import run_batch  # noqa: E402
 from apflf.utils.config import load_config  # noqa: E402
 
 PRIMARY_METHOD = "no_rl"
+DEFAULT_SCENARIOS = [
+    "s1_local_minima",
+    "s2_dynamic_crossing",
+    "s3_narrow_passage",
+    "s4_overtake_interaction",
+    "s5_dense_multi_agent",
+]
+DEFAULT_METHODS = [PRIMARY_METHOD, "apf", "apf_lf", "st_apf", "dwa", "orca"]
+CANONICAL_SEEDS = list(range(30))
+CANONICAL_SCENARIOS = list(DEFAULT_SCENARIOS)
+CANONICAL_METHODS = list(DEFAULT_METHODS)
 BASELINE_CONFIGS = {
     "apf": "configs/baselines/apf.yaml",
     "apf_lf": "configs/baselines/apf_lf.yaml",
@@ -61,13 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenarios",
         nargs="+",
-        default=["s1_local_minima", "s2_dynamic_crossing", "s3_narrow_passage"],
+        default=DEFAULT_SCENARIOS,
         help="Scenario names without the .yaml suffix.",
     )
     parser.add_argument(
         "--methods",
         nargs="+",
-        default=[PRIMARY_METHOD, "rl_param_only", "apf", "apf_lf", "st_apf", "dwa", "orca"],
+        default=DEFAULT_METHODS,
         help="Methods to evaluate.",
     )
     parser.add_argument(
@@ -75,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=list(ABLATION_CONFIGS),
         help="Ablation names to evaluate on top of the primary method.",
+    )
+    parser.add_argument(
+        "--canonical-matrix",
+        action="store_true",
+        help="Expand to the paper-scale white-box matrix: S1-S5, 30 seeds, baselines, and all ablations.",
     )
     parser.add_argument(
         "--skip-existing",
@@ -192,6 +208,12 @@ def _method_override(method_name: str, args: argparse.Namespace) -> tuple[str | 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.canonical_matrix:
+        args.seeds = list(CANONICAL_SEEDS)
+        args.scenarios = list(CANONICAL_SCENARIOS)
+        args.methods = list(CANONICAL_METHODS)
+        args.ablations = list(ABLATION_CONFIGS)
 
     repo_root = Path(__file__).resolve().parents[1]
     paper_dir = repo_root / "outputs" / args.exp_id

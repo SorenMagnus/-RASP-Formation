@@ -9,6 +9,7 @@ import numpy as np
 from apflf.analysis.export import export_paper_artifacts
 from apflf.analysis.stats import (
     aggregate_metric,
+    aggregate_metric_with_ci,
     pairwise_compare_to_reference,
     summarize_experiments,
 )
@@ -18,7 +19,7 @@ def _raw_rows() -> list[dict[str, object]]:
     return [
         {
             "scenario": "s1_local_minima",
-            "method": "adaptive_apf",
+            "method": "no_rl",
             "seed": 0,
             "leader_goal_error": 10.0,
             "time_to_goal": 12.0,
@@ -30,10 +31,14 @@ def _raw_rows() -> list[dict[str, object]]:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.2,
             "terminal_formation_error": 1.0,
+            "longitudinal_jerk_rms": 0.4,
+            "steer_rate_rms": 0.3,
+            "mean_step_runtime_ms": 12.0,
+            "qp_solve_time_mean_ms": 1.2,
         },
         {
             "scenario": "s1_local_minima",
-            "method": "adaptive_apf",
+            "method": "no_rl",
             "seed": 1,
             "leader_goal_error": 8.0,
             "time_to_goal": 11.5,
@@ -45,6 +50,10 @@ def _raw_rows() -> list[dict[str, object]]:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.1,
             "terminal_formation_error": 0.8,
+            "longitudinal_jerk_rms": 0.3,
+            "steer_rate_rms": 0.2,
+            "mean_step_runtime_ms": 11.0,
+            "qp_solve_time_mean_ms": 1.0,
         },
         {
             "scenario": "s1_local_minima",
@@ -60,6 +69,10 @@ def _raw_rows() -> list[dict[str, object]]:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.3,
             "terminal_formation_error": 1.6,
+            "longitudinal_jerk_rms": 0.9,
+            "steer_rate_rms": 0.7,
+            "mean_step_runtime_ms": 10.0,
+            "qp_solve_time_mean_ms": 0.8,
         },
         {
             "scenario": "s1_local_minima",
@@ -75,6 +88,10 @@ def _raw_rows() -> list[dict[str, object]]:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.35,
             "terminal_formation_error": 1.8,
+            "longitudinal_jerk_rms": 1.0,
+            "steer_rate_rms": 0.8,
+            "mean_step_runtime_ms": 10.5,
+            "qp_solve_time_mean_ms": 0.9,
         },
     ]
 
@@ -95,11 +112,20 @@ def test_aggregate_metric_constant_values_collapse_ci() -> None:
     assert aggregate.ci_high == 2.5
 
 
+def test_aggregate_metric_with_t_interval_is_supported() -> None:
+    aggregate = aggregate_metric_with_ci(
+        np.asarray([1.0, 2.0, 3.0]),
+        ci_method="t",
+    )
+    assert aggregate.count == 3
+    assert aggregate.ci_low <= aggregate.mean <= aggregate.ci_high
+
+
 def test_summarize_and_pairwise_comparison_generate_rows() -> None:
     summary_rows = summarize_experiments(_raw_rows())
     comparison_rows = pairwise_compare_to_reference(
         _raw_rows(),
-        reference_method="adaptive_apf",
+        reference_method="no_rl",
     )
 
     assert len(summary_rows) == 2
@@ -111,7 +137,7 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
     rows = [
         {
             "scenario": "s_constant",
-            "method": "adaptive_apf",
+            "method": "no_rl",
             "leader_goal_error": 5.0,
             "mean_speed": 3.0,
             "min_obstacle_clearance": 0.8,
@@ -119,10 +145,14 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.2,
             "terminal_formation_error": 0.5,
+            "longitudinal_jerk_rms": 0.1,
+            "steer_rate_rms": 0.1,
+            "mean_step_runtime_ms": 10.0,
+            "qp_solve_time_mean_ms": 1.0,
         },
         {
             "scenario": "s_constant",
-            "method": "adaptive_apf",
+            "method": "no_rl",
             "leader_goal_error": 5.0,
             "mean_speed": 3.0,
             "min_obstacle_clearance": 0.8,
@@ -130,6 +160,10 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.2,
             "terminal_formation_error": 0.5,
+            "longitudinal_jerk_rms": 0.1,
+            "steer_rate_rms": 0.1,
+            "mean_step_runtime_ms": 10.0,
+            "qp_solve_time_mean_ms": 1.0,
         },
         {
             "scenario": "s_constant",
@@ -141,6 +175,10 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.2,
             "terminal_formation_error": 0.5,
+            "longitudinal_jerk_rms": 0.1,
+            "steer_rate_rms": 0.1,
+            "mean_step_runtime_ms": 10.0,
+            "qp_solve_time_mean_ms": 1.0,
         },
         {
             "scenario": "s_constant",
@@ -152,11 +190,15 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
             "boundary_violation_count": 0,
             "fallback_ratio": 0.2,
             "terminal_formation_error": 0.5,
+            "longitudinal_jerk_rms": 0.1,
+            "steer_rate_rms": 0.1,
+            "mean_step_runtime_ms": 10.0,
+            "qp_solve_time_mean_ms": 1.0,
         },
     ]
     comparison_rows = pairwise_compare_to_reference(
         rows,
-        reference_method="adaptive_apf",
+        reference_method="no_rl",
     )
 
     goal_error_rows = [row for row in comparison_rows if row["metric"] == "leader_goal_error"]
@@ -171,7 +213,7 @@ def test_pairwise_comparison_handles_identical_constant_samples() -> None:
 def test_pairwise_comparison_reports_paired_seed_statistics() -> None:
     comparison_rows = pairwise_compare_to_reference(
         _raw_rows(),
-        reference_method="adaptive_apf",
+        reference_method="no_rl",
     )
 
     goal_error_rows = [row for row in comparison_rows if row["metric"] == "leader_goal_error"]
@@ -188,7 +230,7 @@ def test_export_paper_artifacts_writes_tables_and_figures(tmp_path: Path) -> Non
     summary_rows = summarize_experiments(raw_rows)
     comparison_rows = pairwise_compare_to_reference(
         raw_rows,
-        reference_method="adaptive_apf",
+        reference_method="no_rl",
     )
 
     export_paper_artifacts(
@@ -203,5 +245,11 @@ def test_export_paper_artifacts_writes_tables_and_figures(tmp_path: Path) -> Non
     assert (tmp_path / "tables" / "main_results.tex").exists()
     assert (tmp_path / "figures" / "metric_overview.pdf").exists()
     assert (tmp_path / "figures" / "safety_efficiency_tradeoff.pdf").exists()
+    assert (tmp_path / "figures" / "trajectory_overview.pdf").exists()
+    assert (tmp_path / "figures" / "risk_clearance_timeseries.pdf").exists()
+    assert (tmp_path / "figures" / "qp_correction_timeline.pdf").exists()
+    assert (tmp_path / "figures" / "mode_timeline.pdf").exists()
+    assert (tmp_path / "figures" / "runtime_histogram.pdf").exists()
+    assert (tmp_path / "figures" / "failure_case_panel.pdf").exists()
     pretty_table = (tmp_path / "tables" / "main_results_pretty.csv").read_text(encoding="utf-8")
     assert "+/-" in pretty_table

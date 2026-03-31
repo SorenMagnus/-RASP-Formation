@@ -32,11 +32,17 @@ python scripts/reproduce_paper.py ^
   --exp-id paper_smoke ^
   --seeds 0 1 ^
   --scenarios s1_local_minima s2_dynamic_crossing s3_narrow_passage ^
-  --methods adaptive_apf apf apf_lf st_apf dwa orca ^
+  --methods no_rl apf apf_lf st_apf dwa orca ^
   --ablations no_cbf no_fsm no_risk_adaptation no_st_terms no_escape
 ```
 
 On shells that do not support `^` line continuation, put the command on one line.
+
+Run the canonical white-box paper matrix:
+
+```bash
+python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix
+```
 
 The output directory contains:
 
@@ -52,6 +58,16 @@ If `all_runs.csv` already exists, figures and tables can be regenerated without 
 
 ```bash
 python scripts/export_figures.py --input-dir outputs/paper_smoke
+```
+
+## 4b. Analyze RL attribution offline
+
+When `rl_param_only` has been benchmarked against `no_rl`, generate a seed-aligned attribution report:
+
+```bash
+python scripts/analyze_s5_rl_attribution.py ^
+  --rl-run-dir outputs/s5_rl_stage1_cuda__rl_param_only ^
+  --reference-run-dir outputs/s5_rl_stage1_cuda__no_rl
 ```
 
 ## 5. Determinism notes
