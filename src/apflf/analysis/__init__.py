@@ -1,6 +1,7 @@
 """Analysis package exports."""
 
-from apflf.analysis.export import export_paper_artifacts
+from __future__ import annotations
+
 from apflf.analysis.stats import (
     DEFAULT_METRICS,
     aggregate_metric,
@@ -9,6 +10,14 @@ from apflf.analysis.stats import (
     summarize_experiments,
     write_csv_rows,
 )
+
+
+def export_paper_artifacts(*args, **kwargs):
+    """Lazy-export the paper artifact builder to avoid replay/export import cycles."""
+
+    from apflf.analysis.export import export_paper_artifacts as _export_paper_artifacts
+
+    return _export_paper_artifacts(*args, **kwargs)
 
 __all__ = [
     "DEFAULT_METRICS",

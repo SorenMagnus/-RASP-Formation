@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from apflf.analysis.rl_attribution import (
     aggregate_seed_rows,
@@ -95,6 +96,9 @@ def test_rl_attribution_summarizes_and_compares_seed(monkeypatch, tmp_path: Path
     aggregate = aggregate_seed_rows([{"seed": 2, **summary, **comparison}])
 
     assert summary["num_steps"] > 0
+    assert summary["confidence_raw_mean"] > 0.0
+    assert summary["gate_open_steps"] > 0
+    assert summary["accepted_enter_steps"] > 0
     assert summary["theta_changed_steps"] > 0
     assert summary["theta_clip_steps"] > 0
     assert summary["dominant_bottleneck"] in {
@@ -107,6 +111,11 @@ def test_rl_attribution_summarizes_and_compares_seed(monkeypatch, tmp_path: Path
     assert comparison["nominal_layer_changed"] is True
     assert comparison["leader_target_speed_delta_abs_mean"] > 0.0
     assert aggregate["num_seeds"] == 1
+    assert rl_bundle.snapshots[0].decision_diagnostics.confidence_raw == pytest.approx(
+        rl_bundle.snapshots[0].decision_diagnostics.confidence
+    )
+    assert rl_bundle.snapshots[0].decision_diagnostics.gate_open is True
+    assert rl_bundle.snapshots[0].decision_diagnostics.gate_reason == "accepted_enter"
 
 
 def test_analyze_s5_rl_attribution_script_writes_outputs(monkeypatch, tmp_path: Path, capsys) -> None:

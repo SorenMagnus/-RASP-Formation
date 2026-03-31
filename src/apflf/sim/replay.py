@@ -197,6 +197,11 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
             "decision_confidences",
             default=np.ones(safe_actions.shape[0], dtype=float),
         )
+        decision_confidence_raw = _optional_array(
+            data,
+            "decision_confidence_raw",
+            default=np.asarray(decision_confidences, dtype=float),
+        )
         decision_thetas = _optional_array(
             data,
             "decision_thetas",
@@ -211,6 +216,16 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
             data,
             "decision_rl_fallbacks",
             default=np.zeros(safe_actions.shape[0], dtype=bool),
+        )
+        decision_gate_opens = _optional_array(
+            data,
+            "decision_gate_opens",
+            default=np.zeros(safe_actions.shape[0], dtype=bool),
+        )
+        decision_gate_reasons = _optional_array(
+            data,
+            "decision_gate_reasons",
+            default=np.full(safe_actions.shape[0], "legacy", dtype="<U32"),
         )
         decision_theta_clipped = _optional_array(
             data,
@@ -293,9 +308,12 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
                 decision_diagnostics=DecisionDiagnostics(
                     source=str(decision_sources[step_index - 1]),
                     confidence=float(decision_confidences[step_index - 1]),
+                    confidence_raw=float(decision_confidence_raw[step_index - 1]),
                     theta=tuple(float(value) for value in decision_thetas[step_index - 1]),
                     theta_delta=tuple(float(value) for value in decision_theta_deltas[step_index - 1]),
                     rl_fallback=bool(decision_rl_fallbacks[step_index - 1]),
+                    gate_open=bool(decision_gate_opens[step_index - 1]),
+                    gate_reason=str(decision_gate_reasons[step_index - 1]),
                     theta_clipped=bool(decision_theta_clipped[step_index - 1]),
                     normalized_obs_max_abs=float(decision_normalized_obs_max_abs[step_index - 1]),
                 ),

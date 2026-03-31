@@ -453,10 +453,15 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
         if default_value < lower or default_value > upper:
             raise ValueError(f"`decision.rl.theta.default[{index}]` must lie within bounds.")
 
+    tau_enter = float(rl_raw.get("tau_enter", rl_raw.get("confidence_threshold", 0.55)))
+    tau_exit = float(rl_raw.get("tau_exit", max(0.0, tau_enter - 0.10)))
+
     rl_config = RLDecisionConfig(
         checkpoint_path=str(rl_raw.get("checkpoint_path", "")),
         deterministic_eval=bool(rl_raw.get("deterministic_eval", False)),
-        confidence_threshold=float(rl_raw.get("confidence_threshold", 0.55)),
+        confidence_threshold=tau_enter,
+        tau_enter=tau_enter,
+        tau_exit=tau_exit,
         ood_threshold=float(rl_raw.get("ood_threshold", 6.0)),
         observation_history=int(
             _require_positive(
@@ -479,6 +484,10 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
     )
     if not 0.0 <= rl_config.confidence_threshold <= 1.0:
         raise ValueError("`decision.rl.confidence_threshold` must lie in [0, 1].")
+    if not 0.0 < rl_config.tau_enter <= 1.0:
+        raise ValueError("`decision.rl.tau_enter` must lie in (0, 1].")
+    if not 0.0 <= rl_config.tau_exit < rl_config.tau_enter:
+        raise ValueError("`decision.rl.tau_exit` must satisfy 0 <= tau_exit < tau_enter.")
     if rl_config.ood_threshold < 0.0 or not math.isfinite(rl_config.ood_threshold):
         raise ValueError("`decision.rl.ood_threshold` must be finite and non-negative.")
 

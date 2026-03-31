@@ -20,6 +20,8 @@ def summarize_rl_seed(
     bundle: ReplayBundle,
     *,
     confidence_threshold: float | None = None,
+    tau_enter: float | None = None,
+    tau_exit: float | None = None,
     ood_threshold: float | None = None,
     theta_reference: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR,
     theta_tol: float = 1e-6,
@@ -28,6 +30,10 @@ def summarize_rl_seed(
 
     if confidence_threshold is None:
         confidence_threshold = float(bundle.config.decision.rl.confidence_threshold)
+    if tau_enter is None:
+        tau_enter = float(getattr(bundle.config.decision.rl, "tau_enter", confidence_threshold))
+    if tau_exit is None:
+        tau_exit = float(getattr(bundle.config.decision.rl, "tau_exit", max(0.0, tau_enter - 0.10)))
     if ood_threshold is None:
         ood_threshold = float(bundle.config.decision.rl.ood_threshold)
 
@@ -42,6 +48,7 @@ def summarize_rl_seed(
             "safety_intervention_steps": 0,
             "safety_fallback_steps": 0,
             "qp_engagement_steps": 0,
+            "gate_open_steps": 0,
             "dominant_bottleneck": "empty_run",
         }
 
@@ -49,13 +56,17 @@ def summarize_rl_seed(
     theta_reference_array = np.asarray(theta_reference, dtype=float)
     theta_linf_from_default: list[float] = []
     theta_delta_linf: list[float] = []
+    confidence_raw_values: list[float] = []
     low_confidence_fallback_steps = 0
     ood_fallback_steps = 0
     both_gate_fallback_steps = 0
     safety_intervention_steps = 0
     safety_fallback_steps = 0
     qp_engagement_steps = 0
+    gate_open_steps = 0
     leader_risk_scores: list[float] = []
+    gate_reason_counts: Counter[str] = Counter()
+    previous_gate_open = False
 
     for snapshot in bundle.snapshots:
         diagnostics = snapshot.decision_diagnostics
@@ -63,10 +74,17 @@ def summarize_rl_seed(
             _linf(np.asarray(diagnostics.theta, dtype=float) - theta_reference_array)
         )
         theta_delta_linf.append(_linf(diagnostics.theta_delta))
+        confidence_raw = float(getattr(diagnostics, "confidence_raw", diagnostics.confidence))
+        confidence_raw_values.append(confidence_raw)
         leader_risk_scores.append(float(snapshot.nominal_diagnostics.leader_risk_score))
+        gate_open = bool(getattr(diagnostics, "gate_open", False))
+        gate_open_steps += int(gate_open)
+        gate_reason = str(getattr(diagnostics, "gate_reason", "legacy"))
+        gate_reason_counts[gate_reason] += 1
 
         if diagnostics.source == "rl_fallback":
-            low_confidence = diagnostics.confidence < confidence_threshold
+            active_threshold = tau_exit if previous_gate_open else tau_enter
+            low_confidence = confidence_raw < active_threshold
             ood = diagnostics.normalized_obs_max_abs > ood_threshold
             if low_confidence and ood:
                 both_gate_fallback_steps += 1
@@ -81,6 +99,7 @@ def summarize_rl_seed(
             safety_fallback_steps += 1
         if any(float(value) > 0.0 for value in snapshot.qp_solve_times):
             qp_engagement_steps += 1
+        previous_gate_open = gate_open
 
     rl_active_steps = int(source_counts.get("rl", 0))
     rl_fallback_steps = int(source_counts.get("rl_fallback", 0))
@@ -110,10 +129,19 @@ def summarize_rl_seed(
         "fallback_low_confidence_steps": low_confidence_fallback_steps,
         "fallback_ood_steps": ood_fallback_steps,
         "fallback_both_gate_steps": both_gate_fallback_steps,
+        "accepted_enter_steps": int(gate_reason_counts.get("accepted_enter", 0)),
+        "accepted_hold_steps": int(gate_reason_counts.get("accepted_hold", 0)),
+        "fallback_enter_threshold_steps": int(gate_reason_counts.get("confidence_enter_threshold", 0)),
+        "fallback_exit_threshold_steps": int(gate_reason_counts.get("confidence_exit_threshold", 0)),
+        "ood_gate_steps": int(gate_reason_counts.get("ood_threshold", 0)),
+        "gate_open_steps": gate_open_steps,
+        "gate_open_ratio": gate_open_steps / step_count,
         "theta_changed_steps": theta_changed_steps,
         "theta_change_ratio": theta_change_ratio,
         "theta_clip_steps": theta_clip_steps,
         "theta_clip_ratio": theta_clip_steps / step_count,
+        "confidence_raw_mean": float(np.mean(confidence_raw_values)),
+        "confidence_raw_min": float(np.min(confidence_raw_values)),
         "theta_linf_from_default_mean": float(np.mean(theta_linf_from_default)),
         "theta_linf_from_default_max": float(np.max(theta_linf_from_default)),
         "theta_delta_linf_mean": float(np.mean(theta_delta_linf)),
@@ -127,6 +155,8 @@ def summarize_rl_seed(
         "leader_risk_score_mean": float(np.mean(leader_risk_scores)),
         "leader_risk_score_max": float(np.max(leader_risk_scores)),
         "confidence_threshold": float(confidence_threshold),
+        "tau_enter": float(tau_enter),
+        "tau_exit": float(tau_exit),
         "ood_threshold": float(ood_threshold),
         "dominant_bottleneck": dominant_bottleneck,
     }

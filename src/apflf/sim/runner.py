@@ -114,9 +114,15 @@ def _write_run_artifact(
     leader_force_total = build_nominal_force_history(snapshots, "total")
     decision_sources = build_decision_source_series(snapshots)
     decision_confidences = build_decision_scalar_series(snapshots, "confidence")
+    decision_confidence_raw = build_decision_scalar_series(snapshots, "confidence_raw")
     decision_thetas = build_decision_theta_history(snapshots, "theta")
     decision_theta_deltas = build_decision_theta_history(snapshots, "theta_delta")
     decision_rl_fallbacks = build_decision_scalar_series(snapshots, "rl_fallback", dtype=np.bool_)
+    decision_gate_opens = build_decision_scalar_series(snapshots, "gate_open", dtype=np.bool_)
+    decision_gate_reasons = np.asarray(
+        [snapshot.decision_diagnostics.gate_reason for snapshot in snapshots],
+        dtype="<U32",
+    )
     decision_theta_clipped = build_decision_scalar_series(snapshots, "theta_clipped", dtype=np.bool_)
     decision_normalized_obs_max_abs = build_decision_scalar_series(
         snapshots,
@@ -161,9 +167,12 @@ def _write_run_artifact(
         leader_force_total=leader_force_total,
         decision_sources=decision_sources,
         decision_confidences=decision_confidences,
+        decision_confidence_raw=decision_confidence_raw,
         decision_thetas=decision_thetas,
         decision_theta_deltas=decision_theta_deltas,
         decision_rl_fallbacks=decision_rl_fallbacks,
+        decision_gate_opens=decision_gate_opens,
+        decision_gate_reasons=decision_gate_reasons,
         decision_theta_clipped=decision_theta_clipped,
         decision_normalized_obs_max_abs=decision_normalized_obs_max_abs,
         step_runtimes=step_runtimes,

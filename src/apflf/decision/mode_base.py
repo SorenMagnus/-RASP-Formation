@@ -176,6 +176,8 @@ def build_mode_decision(
             normalizer=policy_bundle.normalizer,
             constraints=config.rl.theta,
             confidence_threshold=config.rl.confidence_threshold,
+            tau_enter=config.rl.tau_enter,
+            tau_exit=config.rl.tau_exit,
             ood_threshold=config.rl.ood_threshold,
             deterministic_eval=config.rl.deterministic_eval,
             vehicle_length=vehicle_length,

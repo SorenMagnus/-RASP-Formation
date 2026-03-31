@@ -147,9 +147,11 @@ class TorchBetaPolicy:
             theta_lower = torch.as_tensor(self.theta_config.lower, dtype=torch.float32)
             theta_upper = torch.as_tensor(self.theta_config.upper, dtype=torch.float32)
             theta = theta_lower + sample01.squeeze(0) * (theta_upper - theta_lower)
-            entropy = distribution.entropy().squeeze(0)
-            normalized_entropy = torch.exp(torch.clamp(entropy, max=0.0))
-            confidence = torch.clamp(1.0 - normalized_entropy.mean(), 0.0, 1.0)
+            alpha = distribution.concentration1.squeeze(0)
+            beta = distribution.concentration0.squeeze(0)
+            variance = (alpha * beta) / (((alpha + beta) ** 2) * (alpha + beta + 1.0))
+            uniform_variance = torch.full_like(variance.mean(), 1.0 / 12.0)
+            confidence = torch.clamp(1.0 - variance.mean() / uniform_variance, 0.0, 1.0)
         return PolicyInference(
             theta=tuple(float(value) for value in theta.cpu().numpy()),
             confidence=float(confidence.cpu().item()),

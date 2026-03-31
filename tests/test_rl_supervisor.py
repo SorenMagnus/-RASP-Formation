@@ -18,7 +18,7 @@ from apflf.rl.ppo import PPOConfig, PPOTrainer
 from apflf.sim.replay import load_replay_bundle, read_summary_row
 from apflf.sim.runner import run_batch
 from apflf.utils.config import load_config
-from apflf.utils.types import ModeDecision
+from apflf.utils.types import ModeDecision, RLThetaConfig
 
 
 class DummySequencePolicy:
@@ -164,6 +164,41 @@ def _make_fsm(config):
     )
 
 
+def test_torch_beta_policy_uses_variance_calibrated_confidence() -> None:
+    _require_torch()
+    from apflf.rl.policy import TorchBetaPolicy
+
+    class UniformBetaNetwork:
+        def distribution_and_value(self, observations):
+            del observations
+            alpha = torch.ones((1, 4), dtype=torch.float32)
+            beta = torch.ones((1, 4), dtype=torch.float32)
+            return torch.distributions.Beta(alpha, beta), torch.zeros(1, dtype=torch.float32)
+
+    class ConcentratedBetaNetwork:
+        def distribution_and_value(self, observations):
+            del observations
+            alpha = torch.full((1, 4), 9.0, dtype=torch.float32)
+            beta = torch.full((1, 4), 9.0, dtype=torch.float32)
+            return torch.distributions.Beta(alpha, beta), torch.zeros(1, dtype=torch.float32)
+
+    theta_config = RLThetaConfig()
+    lower = np.asarray(theta_config.lower, dtype=float)
+    upper = np.asarray(theta_config.upper, dtype=float)
+    expected_theta = tuple(float(value) for value in (lower + upper) * 0.5)
+
+    uniform_policy = TorchBetaPolicy(network=UniformBetaNetwork(), theta_config=theta_config)
+    concentrated_policy = TorchBetaPolicy(network=ConcentratedBetaNetwork(), theta_config=theta_config)
+
+    uniform = uniform_policy.infer(np.zeros(8, dtype=float), deterministic=True)
+    concentrated = concentrated_policy.infer(np.zeros(8, dtype=float), deterministic=True)
+
+    assert uniform.theta == pytest.approx(expected_theta)
+    assert uniform.confidence == pytest.approx(0.0)
+    assert 0.0 <= concentrated.confidence <= 1.0
+    assert concentrated.confidence > uniform.confidence
+
+
 def test_rl_supervisor_without_policy_matches_fsm_exactly() -> None:
     config = _default_config()
     scenario = ScenarioFactory(config=config).build(seed=0)
@@ -186,6 +221,8 @@ def test_rl_supervisor_without_policy_matches_fsm_exactly() -> None:
         normalizer=ObservationNormalizer.identity(dim=1),
         constraints=config.decision.rl.theta,
         confidence_threshold=config.decision.rl.confidence_threshold,
+        tau_enter=config.decision.rl.tau_enter,
+        tau_exit=config.decision.rl.tau_exit,
         ood_threshold=config.decision.rl.ood_threshold,
         deterministic_eval=True,
         vehicle_length=config.controller.vehicle_length,
@@ -199,10 +236,13 @@ def test_rl_supervisor_without_policy_matches_fsm_exactly() -> None:
 
     assert actual_mode.mode == expected_mode.mode
     assert actual_mode.theta == pure_fsm.default_theta()
-    assert supervisor.consume_step_diagnostics().source == "fsm"
+    diagnostics = supervisor.consume_step_diagnostics()
+    assert diagnostics.source == "fsm"
+    assert diagnostics.gate_open is False
+    assert diagnostics.gate_reason == "policy_missing"
 
 
-def test_rl_supervisor_projects_rate_limits_and_fallbacks_on_low_confidence() -> None:
+def test_rl_supervisor_applies_hysteresis_gate_and_exact_fallback() -> None:
     config = _default_config()
     scenario = ScenarioFactory(config=config).build(seed=0)
     from apflf.utils.types import Observation
@@ -220,8 +260,9 @@ def test_rl_supervisor_projects_rate_limits_and_fallbacks_on_low_confidence() ->
         fallback_fsm=_make_fsm(config),
         policy=DummySequencePolicy(
             outputs=[
-                ((2.0, 1.9, 1.8, 1.2), 0.95),
-                ((0.1, 0.1, 0.1, 0.1), 0.40),
+                ((2.0, 1.9, 1.8, 1.2), 0.60),
+                ((1.5, 1.4, 1.3, 0.2), 0.50),
+                ((0.1, 0.1, 0.1, 0.1), 0.44),
             ]
         ),
         normalizer=ObservationNormalizer(
@@ -230,6 +271,8 @@ def test_rl_supervisor_projects_rate_limits_and_fallbacks_on_low_confidence() ->
         ),
         constraints=config.decision.rl.theta,
         confidence_threshold=config.decision.rl.confidence_threshold,
+        tau_enter=0.55,
+        tau_exit=0.45,
         ood_threshold=1e6,
         deterministic_eval=True,
         vehicle_length=config.controller.vehicle_length,
@@ -242,16 +285,72 @@ def test_rl_supervisor_projects_rate_limits_and_fallbacks_on_low_confidence() ->
     first_diag = supervisor.consume_step_diagnostics()
     second = supervisor.select(observation, 1)
     second_diag = supervisor.consume_step_diagnostics()
+    third = supervisor.select(observation, 2)
+    third_diag = supervisor.consume_step_diagnostics()
 
     assert isinstance(first, ModeDecision)
     assert not hasattr(first, "accel")
     assert first.source == "rl"
+    assert first_diag.confidence_raw == pytest.approx(0.60)
+    assert first_diag.gate_open is True
+    assert first_diag.gate_reason == "accepted_enter"
     assert first_diag.theta_clipped is True
     for delta, limit in zip(first_diag.theta_delta, config.decision.rl.theta.rate_limit, strict=True):
         assert abs(delta) <= limit + 1e-9
-    assert second.source == "rl_fallback"
-    assert second.theta == config.decision.rl.theta.default
-    assert second_diag.rl_fallback is True
+    assert second.source == "rl"
+    assert second_diag.gate_open is True
+    assert second_diag.gate_reason == "accepted_hold"
+    assert second_diag.confidence_raw == pytest.approx(0.50)
+    assert third.source == "rl_fallback"
+    assert third.theta == config.decision.rl.theta.default
+    assert third_diag.rl_fallback is True
+    assert third_diag.gate_open is False
+    assert third_diag.gate_reason == "confidence_exit_threshold"
+
+
+def test_rl_supervisor_ood_forces_fallback_even_with_high_confidence() -> None:
+    config = _default_config()
+    scenario = ScenarioFactory(config=config).build(seed=0)
+    from apflf.utils.types import Observation
+
+    observation = Observation(
+        step_index=0,
+        time=0.0,
+        states=scenario.initial_states,
+        road=scenario.road,
+        goal_x=scenario.goal_x,
+        desired_offsets=scenario.desired_offsets,
+        obstacles=(),
+    )
+    supervisor = RLSupervisor(
+        fallback_fsm=_make_fsm(config),
+        policy=DummySequencePolicy(outputs=[((1.2, 1.2, 1.2, 0.1), 0.99)]),
+        normalizer=ObservationNormalizer(
+            mean=np.zeros(108, dtype=float),
+            std=np.full(108, 1e-3, dtype=float),
+        ),
+        constraints=config.decision.rl.theta,
+        confidence_threshold=config.decision.rl.confidence_threshold,
+        tau_enter=0.55,
+        tau_exit=0.45,
+        ood_threshold=6.0,
+        deterministic_eval=True,
+        vehicle_length=config.controller.vehicle_length,
+        vehicle_width=config.controller.vehicle_width,
+        observation_history=config.decision.rl.observation_history,
+        interaction_limit=config.decision.rl.interaction_limit,
+    )
+
+    decision = supervisor.select(observation, 0)
+    diagnostics = supervisor.consume_step_diagnostics()
+
+    assert decision.source == "rl_fallback"
+    assert decision.theta == config.decision.rl.theta.default
+    assert diagnostics.rl_fallback is True
+    assert diagnostics.gate_open is False
+    assert diagnostics.gate_reason == "ood_threshold"
+    assert diagnostics.confidence_raw == pytest.approx(0.99)
+    assert diagnostics.normalized_obs_max_abs > supervisor.ood_threshold
 
 
 def test_run_batch_with_rl_policy_is_deterministic_and_persists_rl_metrics(
@@ -308,6 +407,11 @@ def test_run_batch_with_rl_policy_is_deterministic_and_persists_rl_metrics(
     assert theta_a == theta_b
     assert modes_a == modes_b
     assert bundle_a.snapshots[0].decision_diagnostics.source == "rl"
+    assert bundle_a.snapshots[0].decision_diagnostics.confidence_raw == pytest.approx(
+        bundle_a.snapshots[0].decision_diagnostics.confidence
+    )
+    assert bundle_a.snapshots[0].decision_diagnostics.gate_open is True
+    assert bundle_a.snapshots[0].decision_diagnostics.gate_reason == "accepted_enter"
     assert bundle_a.snapshots[0].decision_diagnostics.theta_clipped is True
 
 

@@ -130,7 +130,10 @@ class RLDecisionConfig:
 
     checkpoint_path: str = ""
     deterministic_eval: bool = False
+    # Legacy alias preserved for backward-compatible config export/reporting.
     confidence_threshold: float = 0.55
+    tau_enter: float = 0.55
+    tau_exit: float = 0.45
     ood_threshold: float = 6.0
     observation_history: int = 5
     interaction_limit: int = 8
@@ -365,9 +368,12 @@ class DecisionDiagnostics:
 
     source: str = "fsm"
     confidence: float = 1.0
+    confidence_raw: float = 1.0
     theta: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR
     theta_delta: tuple[float, float, float, float] = ZERO_THETA_VECTOR
     rl_fallback: bool = False
+    gate_open: bool = False
+    gate_reason: str = "fsm"
     theta_clipped: bool = False
     normalized_obs_max_abs: float = 0.0
 

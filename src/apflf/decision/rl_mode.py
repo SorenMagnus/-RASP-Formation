@@ -10,7 +10,6 @@ from apflf.decision.mode_base import ModeDecisionModule
 from apflf.rl.features import SupervisorObservationBuilder
 from apflf.rl.policy import ObservationNormalizer, PolicyBundle, PolicyProtocol, load_policy_bundle
 from apflf.utils.types import (
-    DEFAULT_THETA_VECTOR,
     DecisionDiagnostics,
     ModeDecision,
     RLThetaConfig,
@@ -45,6 +44,8 @@ class RLSupervisor(ModeDecisionModule):
         normalizer: ObservationNormalizer,
         constraints: RLThetaConfig,
         confidence_threshold: float,
+        tau_enter: float,
+        tau_exit: float,
         ood_threshold: float,
         deterministic_eval: bool,
         vehicle_length: float,
@@ -57,8 +58,14 @@ class RLSupervisor(ModeDecisionModule):
         self.normalizer = normalizer
         self.constraints = constraints
         self.confidence_threshold = float(confidence_threshold)
+        self.tau_enter = float(tau_enter)
+        self.tau_exit = float(tau_exit)
         self.ood_threshold = float(ood_threshold)
         self.deterministic_eval = bool(deterministic_eval)
+        if not 0.0 < self.tau_enter <= 1.0:
+            raise ValueError("`tau_enter` must lie in (0, 1].")
+        if not 0.0 <= self.tau_exit < self.tau_enter:
+            raise ValueError("`tau_exit` must satisfy 0 <= tau_exit < tau_enter.")
         self.feature_builder = SupervisorObservationBuilder(
             vehicle_length=vehicle_length,
             vehicle_width=vehicle_width,
@@ -67,6 +74,7 @@ class RLSupervisor(ModeDecisionModule):
         )
         self._previous_theta = constraints.default
         self._previous_theta_delta = ZERO_THETA_VECTOR
+        self._gate_open = False
         self._step_diagnostics = DecisionDiagnostics()
 
     def reset(self, seed: int | None = None) -> None:
@@ -76,6 +84,7 @@ class RLSupervisor(ModeDecisionModule):
             self.policy.reset(seed)
         self._previous_theta = self.constraints.default
         self._previous_theta_delta = ZERO_THETA_VECTOR
+        self._gate_open = False
         self._step_diagnostics = DecisionDiagnostics()
 
     def default_theta(self) -> tuple[float, float, float, float]:
@@ -107,7 +116,10 @@ class RLSupervisor(ModeDecisionModule):
                 theta=fallback_decision.theta,
                 source="fsm",
                 confidence=1.0,
+                confidence_raw=1.0,
                 rl_fallback=False,
+                gate_open=False,
+                gate_reason="policy_missing",
                 theta_clipped=False,
                 normalized_obs_max_abs=0.0,
             )
@@ -125,30 +137,58 @@ class RLSupervisor(ModeDecisionModule):
             normalized_observation,
             deterministic=self.deterministic_eval,
         )
-        confidence = float(np.clip(inference.confidence, 0.0, 1.0))
+        confidence_raw = float(np.clip(inference.confidence, 0.0, 1.0))
         projected = self._project_theta(inference.theta)
         rate_limited = self._rate_limit(projected.theta)
         theta_clipped = projected.clipped or any(
             abs(a - b) > 1e-12 for a, b in zip(projected.theta, rate_limited, strict=True)
         )
 
-        if normalized_obs_max_abs > self.ood_threshold or confidence < self.confidence_threshold:
+        if normalized_obs_max_abs > self.ood_threshold:
+            self._gate_open = False
             return self._finalize_decision(
                 mode=fallback_decision.mode,
                 theta=fallback_decision.theta,
                 source="rl_fallback",
-                confidence=confidence,
+                confidence=confidence_raw,
+                confidence_raw=confidence_raw,
                 rl_fallback=True,
+                gate_open=False,
+                gate_reason="ood_threshold",
                 theta_clipped=theta_clipped,
                 normalized_obs_max_abs=normalized_obs_max_abs,
             )
 
+        active_threshold = self.tau_exit if self._gate_open else self.tau_enter
+        if confidence_raw < active_threshold:
+            gate_reason = (
+                "confidence_exit_threshold" if self._gate_open else "confidence_enter_threshold"
+            )
+            self._gate_open = False
+            return self._finalize_decision(
+                mode=fallback_decision.mode,
+                theta=fallback_decision.theta,
+                source="rl_fallback",
+                confidence=confidence_raw,
+                confidence_raw=confidence_raw,
+                rl_fallback=True,
+                gate_open=False,
+                gate_reason=gate_reason,
+                theta_clipped=theta_clipped,
+                normalized_obs_max_abs=normalized_obs_max_abs,
+            )
+
+        gate_reason = "accepted_hold" if self._gate_open else "accepted_enter"
+        self._gate_open = True
         return self._finalize_decision(
             mode=fallback_decision.mode,
             theta=rate_limited,
             source="rl",
-            confidence=confidence,
+            confidence=confidence_raw,
+            confidence_raw=confidence_raw,
             rl_fallback=False,
+            gate_open=True,
+            gate_reason=gate_reason,
             theta_clipped=theta_clipped,
             normalized_obs_max_abs=normalized_obs_max_abs,
         )
@@ -195,7 +235,10 @@ class RLSupervisor(ModeDecisionModule):
         theta: tuple[float, float, float, float],
         source: str,
         confidence: float,
+        confidence_raw: float,
         rl_fallback: bool,
+        gate_open: bool,
+        gate_reason: str,
         theta_clipped: bool,
         normalized_obs_max_abs: float,
     ) -> ModeDecision:
@@ -208,9 +251,12 @@ class RLSupervisor(ModeDecisionModule):
         self._step_diagnostics = DecisionDiagnostics(
             source=source,
             confidence=float(confidence),
+            confidence_raw=float(confidence_raw),
             theta=self._previous_theta,
             theta_delta=theta_delta,
             rl_fallback=bool(rl_fallback),
+            gate_open=bool(gate_open),
+            gate_reason=str(gate_reason),
             theta_clipped=bool(theta_clipped),
             normalized_obs_max_abs=float(normalized_obs_max_abs),
         )
