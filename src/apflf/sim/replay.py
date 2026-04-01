@@ -202,6 +202,24 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
             "decision_confidence_raw",
             default=np.asarray(decision_confidences, dtype=float),
         )
+        decision_effective_tau_enters = _optional_array(
+            data,
+            "decision_effective_tau_enters",
+            default=np.full(
+                safe_actions.shape[0],
+                float(getattr(config.decision.rl, "tau_enter", 0.55)),
+                dtype=float,
+            ),
+        )
+        decision_effective_tau_exits = _optional_array(
+            data,
+            "decision_effective_tau_exits",
+            default=np.full(
+                safe_actions.shape[0],
+                float(getattr(config.decision.rl, "tau_exit", 0.45)),
+                dtype=float,
+            ),
+        )
         decision_thetas = _optional_array(
             data,
             "decision_thetas",
@@ -309,6 +327,8 @@ def load_replay_bundle(run_dir: Path, seed: int) -> ReplayBundle:
                     source=str(decision_sources[step_index - 1]),
                     confidence=float(decision_confidences[step_index - 1]),
                     confidence_raw=float(decision_confidence_raw[step_index - 1]),
+                    effective_tau_enter=float(decision_effective_tau_enters[step_index - 1]),
+                    effective_tau_exit=float(decision_effective_tau_exits[step_index - 1]),
                     theta=tuple(float(value) for value in decision_thetas[step_index - 1]),
                     theta_delta=tuple(float(value) for value in decision_theta_deltas[step_index - 1]),
                     rl_fallback=bool(decision_rl_fallbacks[step_index - 1]),

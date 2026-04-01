@@ -115,6 +115,8 @@ def _write_run_artifact(
     decision_sources = build_decision_source_series(snapshots)
     decision_confidences = build_decision_scalar_series(snapshots, "confidence")
     decision_confidence_raw = build_decision_scalar_series(snapshots, "confidence_raw")
+    decision_effective_tau_enters = build_decision_scalar_series(snapshots, "effective_tau_enter")
+    decision_effective_tau_exits = build_decision_scalar_series(snapshots, "effective_tau_exit")
     decision_thetas = build_decision_theta_history(snapshots, "theta")
     decision_theta_deltas = build_decision_theta_history(snapshots, "theta_delta")
     decision_rl_fallbacks = build_decision_scalar_series(snapshots, "rl_fallback", dtype=np.bool_)
@@ -168,6 +170,8 @@ def _write_run_artifact(
         decision_sources=decision_sources,
         decision_confidences=decision_confidences,
         decision_confidence_raw=decision_confidence_raw,
+        decision_effective_tau_enters=decision_effective_tau_enters,
+        decision_effective_tau_exits=decision_effective_tau_exits,
         decision_thetas=decision_thetas,
         decision_theta_deltas=decision_theta_deltas,
         decision_rl_fallbacks=decision_rl_fallbacks,

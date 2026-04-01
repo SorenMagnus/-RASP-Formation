@@ -366,6 +366,8 @@ def test_rl_supervisor_without_policy_matches_fsm_exactly() -> None:
     assert diagnostics.source == "fsm"
     assert diagnostics.gate_open is False
     assert diagnostics.gate_reason == "policy_missing"
+    assert diagnostics.effective_tau_enter == pytest.approx(config.decision.rl.tau_enter)
+    assert diagnostics.effective_tau_exit == pytest.approx(config.decision.rl.tau_exit)
 
 
 def test_rl_supervisor_applies_hysteresis_gate_and_exact_fallback() -> None:
@@ -424,6 +426,8 @@ def test_rl_supervisor_applies_hysteresis_gate_and_exact_fallback() -> None:
     assert first_diag.confidence_raw == pytest.approx(0.60)
     assert first_diag.gate_open is True
     assert first_diag.gate_reason == "accepted_enter"
+    assert first_diag.effective_tau_enter == pytest.approx(0.55)
+    assert first_diag.effective_tau_exit == pytest.approx(0.45)
     assert first_diag.theta_clipped is True
     for delta, limit in zip(first_diag.theta_delta, config.decision.rl.theta.rate_limit, strict=True):
         assert abs(delta) <= limit + 1e-9
@@ -431,11 +435,15 @@ def test_rl_supervisor_applies_hysteresis_gate_and_exact_fallback() -> None:
     assert second_diag.gate_open is True
     assert second_diag.gate_reason == "accepted_hold"
     assert second_diag.confidence_raw == pytest.approx(0.50)
+    assert second_diag.effective_tau_enter == pytest.approx(0.55)
+    assert second_diag.effective_tau_exit == pytest.approx(0.45)
     assert third.source == "rl_fallback"
     assert third.theta == config.decision.rl.theta.default
     assert third_diag.rl_fallback is True
     assert third_diag.gate_open is False
     assert third_diag.gate_reason == "confidence_exit_threshold"
+    assert third_diag.effective_tau_enter == pytest.approx(0.55)
+    assert third_diag.effective_tau_exit == pytest.approx(0.45)
 
 
 def test_rl_supervisor_ood_forces_fallback_even_with_high_confidence() -> None:
@@ -485,6 +493,8 @@ def test_rl_supervisor_ood_forces_fallback_even_with_high_confidence() -> None:
     assert diagnostics.gate_reason == "ood_threshold"
     assert diagnostics.confidence_raw == pytest.approx(0.99)
     assert diagnostics.normalized_obs_max_abs > supervisor.ood_threshold
+    assert diagnostics.effective_tau_enter == pytest.approx(0.55)
+    assert diagnostics.effective_tau_exit == pytest.approx(0.45)
 
 
 def test_rl_supervisor_training_thresholds_anneal_monotonically() -> None:
@@ -587,9 +597,13 @@ def test_rl_supervisor_uses_annealed_thresholds_only_for_non_deterministic_runti
     assert training_decision.source == "rl"
     assert training_diag.gate_open is True
     assert training_diag.gate_reason == "accepted_enter"
+    assert training_diag.effective_tau_enter == pytest.approx(0.25)
+    assert training_diag.effective_tau_exit == pytest.approx(0.15)
     assert deterministic_decision.source == "rl_fallback"
     assert deterministic_diag.gate_open is False
     assert deterministic_diag.gate_reason == "confidence_enter_threshold"
+    assert deterministic_diag.effective_tau_enter == pytest.approx(0.55)
+    assert deterministic_diag.effective_tau_exit == pytest.approx(0.45)
 
 
 def test_run_batch_with_rl_policy_is_deterministic_and_persists_rl_metrics(
@@ -652,6 +666,51 @@ def test_run_batch_with_rl_policy_is_deterministic_and_persists_rl_metrics(
     assert bundle_a.snapshots[0].decision_diagnostics.gate_open is True
     assert bundle_a.snapshots[0].decision_diagnostics.gate_reason == "accepted_enter"
     assert bundle_a.snapshots[0].decision_diagnostics.theta_clipped is True
+    assert bundle_a.snapshots[0].decision_diagnostics.effective_tau_enter == pytest.approx(0.55)
+    assert bundle_a.snapshots[0].decision_diagnostics.effective_tau_exit == pytest.approx(0.45)
+
+
+def test_run_batch_persists_annealed_gate_thresholds_for_training_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_root = tmp_path / "o"
+    config = _default_config()
+    config = replace(
+        config,
+        experiment=replace(config.experiment, output_root=str(output_root), save_traj=True),
+        decision=replace(
+            config.decision,
+            kind="rl",
+            rl=replace(
+                config.decision.rl,
+                checkpoint_path="dummy.ckpt",
+                deterministic_eval=False,
+            ),
+        ),
+    )
+
+    def _bundle_factory(*, checkpoint_path: str, theta_config):
+        del checkpoint_path, theta_config
+        return PolicyBundle(
+            policy=DummySequencePolicy(outputs=[((1.1, 1.1, 1.1, 0.1), 0.30)]),
+            normalizer=ObservationNormalizer(
+                mean=np.zeros(108, dtype=float),
+                std=np.full(108, 100.0, dtype=float),
+            ),
+            checkpoint_timesteps_done=0,
+        )
+
+    monkeypatch.setattr("apflf.decision.rl_mode.load_rl_policy_bundle", _bundle_factory)
+
+    output_dir = run_batch(config=config, seeds=[2], exp_id="tau")
+    bundle = load_replay_bundle(output_dir, 2)
+    diagnostics = bundle.snapshots[0].decision_diagnostics
+
+    assert diagnostics.source == "rl"
+    assert diagnostics.gate_open is True
+    assert diagnostics.effective_tau_enter == pytest.approx(0.25)
+    assert diagnostics.effective_tau_exit == pytest.approx(0.15)
 
 
 def test_ppo_trainer_checkpoint_payload_contains_resume_state(tmp_path: Path) -> None:

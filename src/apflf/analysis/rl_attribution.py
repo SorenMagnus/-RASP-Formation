@@ -49,6 +49,12 @@ def summarize_rl_seed(
             "safety_fallback_steps": 0,
             "qp_engagement_steps": 0,
             "gate_open_steps": 0,
+            "effective_tau_enter_mean": float(tau_enter),
+            "effective_tau_enter_min": float(tau_enter),
+            "effective_tau_enter_max": float(tau_enter),
+            "effective_tau_exit_mean": float(tau_exit),
+            "effective_tau_exit_min": float(tau_exit),
+            "effective_tau_exit_max": float(tau_exit),
             "dominant_bottleneck": "empty_run",
         }
 
@@ -57,6 +63,8 @@ def summarize_rl_seed(
     theta_linf_from_default: list[float] = []
     theta_delta_linf: list[float] = []
     confidence_raw_values: list[float] = []
+    effective_tau_enter_values: list[float] = []
+    effective_tau_exit_values: list[float] = []
     low_confidence_fallback_steps = 0
     ood_fallback_steps = 0
     both_gate_fallback_steps = 0
@@ -76,6 +84,10 @@ def summarize_rl_seed(
         theta_delta_linf.append(_linf(diagnostics.theta_delta))
         confidence_raw = float(getattr(diagnostics, "confidence_raw", diagnostics.confidence))
         confidence_raw_values.append(confidence_raw)
+        effective_tau_enter = float(getattr(diagnostics, "effective_tau_enter", tau_enter))
+        effective_tau_exit = float(getattr(diagnostics, "effective_tau_exit", tau_exit))
+        effective_tau_enter_values.append(effective_tau_enter)
+        effective_tau_exit_values.append(effective_tau_exit)
         leader_risk_scores.append(float(snapshot.nominal_diagnostics.leader_risk_score))
         gate_open = bool(getattr(diagnostics, "gate_open", False))
         gate_open_steps += int(gate_open)
@@ -83,7 +95,7 @@ def summarize_rl_seed(
         gate_reason_counts[gate_reason] += 1
 
         if diagnostics.source == "rl_fallback":
-            active_threshold = tau_exit if previous_gate_open else tau_enter
+            active_threshold = effective_tau_exit if previous_gate_open else effective_tau_enter
             low_confidence = confidence_raw < active_threshold
             ood = diagnostics.normalized_obs_max_abs > ood_threshold
             if low_confidence and ood:
@@ -142,6 +154,12 @@ def summarize_rl_seed(
         "theta_clip_ratio": theta_clip_steps / step_count,
         "confidence_raw_mean": float(np.mean(confidence_raw_values)),
         "confidence_raw_min": float(np.min(confidence_raw_values)),
+        "effective_tau_enter_mean": float(np.mean(effective_tau_enter_values)),
+        "effective_tau_enter_min": float(np.min(effective_tau_enter_values)),
+        "effective_tau_enter_max": float(np.max(effective_tau_enter_values)),
+        "effective_tau_exit_mean": float(np.mean(effective_tau_exit_values)),
+        "effective_tau_exit_min": float(np.min(effective_tau_exit_values)),
+        "effective_tau_exit_max": float(np.max(effective_tau_exit_values)),
         "theta_linf_from_default_mean": float(np.mean(theta_linf_from_default)),
         "theta_linf_from_default_max": float(np.max(theta_linf_from_default)),
         "theta_delta_linf_mean": float(np.mean(theta_delta_linf)),

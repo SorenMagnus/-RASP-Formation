@@ -50,7 +50,14 @@ def _load_script_module(module_name: str, relative_path: str):
     return module
 
 
-def _make_run_pair(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+def _make_run_pair(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    deterministic_eval: bool = True,
+    checkpoint_timesteps_done: int | None = None,
+    confidence: float = 0.92,
+) -> tuple[Path, Path]:
     config = _default_config()
     config = replace(
         config,
@@ -66,7 +73,7 @@ def _make_run_pair(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
             rl=replace(
                 config.decision.rl,
                 checkpoint_path="dummy.ckpt",
-                deterministic_eval=True,
+                deterministic_eval=deterministic_eval,
             ),
         ),
     )
@@ -74,11 +81,12 @@ def _make_run_pair(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     def _bundle_factory(*, checkpoint_path: str, theta_config):
         del checkpoint_path, theta_config
         return PolicyBundle(
-            policy=DummySequencePolicy(outputs=[((1.7, 1.8, 1.6, 0.9), 0.92)]),
+            policy=DummySequencePolicy(outputs=[((1.7, 1.8, 1.6, 0.9), confidence)]),
             normalizer=ObservationNormalizer(
                 mean=np.zeros(108, dtype=float),
                 std=np.full(108, 100.0, dtype=float),
             ),
+            checkpoint_timesteps_done=checkpoint_timesteps_done,
         )
 
     monkeypatch.setattr("apflf.decision.rl_mode.load_rl_policy_bundle", _bundle_factory)
@@ -99,6 +107,8 @@ def test_rl_attribution_summarizes_and_compares_seed(monkeypatch, tmp_path: Path
     assert summary["confidence_raw_mean"] > 0.0
     assert summary["gate_open_steps"] > 0
     assert summary["accepted_enter_steps"] > 0
+    assert summary["effective_tau_enter_mean"] == pytest.approx(0.55)
+    assert summary["effective_tau_exit_mean"] == pytest.approx(0.45)
     assert summary["theta_changed_steps"] > 0
     assert summary["theta_clip_steps"] > 0
     assert summary["dominant_bottleneck"] in {
@@ -116,6 +126,28 @@ def test_rl_attribution_summarizes_and_compares_seed(monkeypatch, tmp_path: Path
     )
     assert rl_bundle.snapshots[0].decision_diagnostics.gate_open is True
     assert rl_bundle.snapshots[0].decision_diagnostics.gate_reason == "accepted_enter"
+    assert rl_bundle.snapshots[0].decision_diagnostics.effective_tau_enter == pytest.approx(0.55)
+    assert rl_bundle.snapshots[0].decision_diagnostics.effective_tau_exit == pytest.approx(0.45)
+
+
+def test_rl_attribution_uses_persisted_annealed_gate_thresholds(monkeypatch, tmp_path: Path) -> None:
+    reference_dir, rl_dir = _make_run_pair(
+        tmp_path,
+        monkeypatch,
+        deterministic_eval=False,
+        checkpoint_timesteps_done=0,
+        confidence=0.30,
+    )
+    del reference_dir
+    rl_bundle = load_replay_bundle(rl_dir, 2)
+
+    summary = summarize_rl_seed(rl_bundle)
+
+    assert rl_bundle.snapshots[0].decision_diagnostics.effective_tau_enter == pytest.approx(0.25)
+    assert rl_bundle.snapshots[0].decision_diagnostics.effective_tau_exit == pytest.approx(0.15)
+    assert summary["effective_tau_enter_mean"] == pytest.approx(0.25)
+    assert summary["effective_tau_exit_mean"] == pytest.approx(0.15)
+    assert summary["gate_open_steps"] > 0
 
 
 def test_analyze_s5_rl_attribution_script_writes_outputs(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -138,6 +170,8 @@ def test_analyze_s5_rl_attribution_script_writes_outputs(monkeypatch, tmp_path: 
     assert exit_code == 0
     report = json.loads(capsys.readouterr().out)
     assert report["num_seeds"] == 1
+    assert report["effective_tau_enter_mean_mean"] == pytest.approx(0.55)
+    assert report["effective_tau_exit_mean_mean"] == pytest.approx(0.45)
     assert (output_dir / "seed_attribution.csv").exists()
     assert (output_dir / "aggregate.json").exists()
     assert (output_dir / "attribution_overview.pdf").exists()

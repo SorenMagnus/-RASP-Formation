@@ -390,6 +390,8 @@ class DecisionDiagnostics:
     source: str = "fsm"
     confidence: float = 1.0
     confidence_raw: float = 1.0
+    effective_tau_enter: float = 0.55
+    effective_tau_exit: float = 0.45
     theta: tuple[float, float, float, float] = DEFAULT_THETA_VECTOR
     theta_delta: tuple[float, float, float, float] = ZERO_THETA_VECTOR
     rl_fallback: bool = False

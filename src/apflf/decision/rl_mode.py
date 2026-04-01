@@ -132,6 +132,7 @@ class RLSupervisor(ModeDecisionModule):
 
     def select(self, observation, step: int) -> ModeDecision:
         fallback_decision = self.fallback_fsm.select(observation, step)
+        effective_tau_enter, effective_tau_exit = self._runtime_gate_thresholds()
         if self.policy is None:
             return self._finalize_decision(
                 mode=fallback_decision.mode,
@@ -139,6 +140,8 @@ class RLSupervisor(ModeDecisionModule):
                 source="fsm",
                 confidence=1.0,
                 confidence_raw=1.0,
+                effective_tau_enter=effective_tau_enter,
+                effective_tau_exit=effective_tau_exit,
                 rl_fallback=False,
                 gate_open=False,
                 gate_reason="policy_missing",
@@ -174,6 +177,8 @@ class RLSupervisor(ModeDecisionModule):
                 source="rl_fallback",
                 confidence=confidence_raw,
                 confidence_raw=confidence_raw,
+                effective_tau_enter=effective_tau_enter,
+                effective_tau_exit=effective_tau_exit,
                 rl_fallback=True,
                 gate_open=False,
                 gate_reason="ood_threshold",
@@ -181,8 +186,7 @@ class RLSupervisor(ModeDecisionModule):
                 normalized_obs_max_abs=normalized_obs_max_abs,
             )
 
-        tau_enter, tau_exit = self._runtime_gate_thresholds()
-        active_threshold = tau_exit if self._gate_open else tau_enter
+        active_threshold = effective_tau_exit if self._gate_open else effective_tau_enter
         if confidence_raw < active_threshold:
             gate_reason = (
                 "confidence_exit_threshold" if self._gate_open else "confidence_enter_threshold"
@@ -194,6 +198,8 @@ class RLSupervisor(ModeDecisionModule):
                 source="rl_fallback",
                 confidence=confidence_raw,
                 confidence_raw=confidence_raw,
+                effective_tau_enter=effective_tau_enter,
+                effective_tau_exit=effective_tau_exit,
                 rl_fallback=True,
                 gate_open=False,
                 gate_reason=gate_reason,
@@ -209,6 +215,8 @@ class RLSupervisor(ModeDecisionModule):
             source="rl",
             confidence=confidence_raw,
             confidence_raw=confidence_raw,
+            effective_tau_enter=effective_tau_enter,
+            effective_tau_exit=effective_tau_exit,
             rl_fallback=False,
             gate_open=True,
             gate_reason=gate_reason,
@@ -284,6 +292,8 @@ class RLSupervisor(ModeDecisionModule):
         source: str,
         confidence: float,
         confidence_raw: float,
+        effective_tau_enter: float,
+        effective_tau_exit: float,
         rl_fallback: bool,
         gate_open: bool,
         gate_reason: str,
@@ -300,6 +310,8 @@ class RLSupervisor(ModeDecisionModule):
             source=source,
             confidence=float(confidence),
             confidence_raw=float(confidence_raw),
+            effective_tau_enter=float(effective_tau_enter),
+            effective_tau_exit=float(effective_tau_exit),
             theta=self._previous_theta,
             theta_delta=theta_delta,
             rl_fallback=bool(rl_fallback),
