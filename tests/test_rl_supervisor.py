@@ -345,8 +345,12 @@ def test_rl_supervisor_without_policy_matches_fsm_exactly() -> None:
         confidence_threshold=config.decision.rl.confidence_threshold,
         tau_enter=config.decision.rl.tau_enter,
         tau_exit=config.decision.rl.tau_exit,
+        tau_enter_start=config.decision.rl.tau_enter_start,
+        tau_exit_start=config.decision.rl.tau_exit_start,
+        gate_warmup_timesteps=config.decision.rl.gate_warmup_timesteps,
         ood_threshold=config.decision.rl.ood_threshold,
         deterministic_eval=True,
+        checkpoint_timesteps_done=None,
         vehicle_length=config.controller.vehicle_length,
         vehicle_width=config.controller.vehicle_width,
         observation_history=config.decision.rl.observation_history,
@@ -395,8 +399,12 @@ def test_rl_supervisor_applies_hysteresis_gate_and_exact_fallback() -> None:
         confidence_threshold=config.decision.rl.confidence_threshold,
         tau_enter=0.55,
         tau_exit=0.45,
+        tau_enter_start=config.decision.rl.tau_enter_start,
+        tau_exit_start=config.decision.rl.tau_exit_start,
+        gate_warmup_timesteps=config.decision.rl.gate_warmup_timesteps,
         ood_threshold=1e6,
         deterministic_eval=True,
+        checkpoint_timesteps_done=None,
         vehicle_length=config.controller.vehicle_length,
         vehicle_width=config.controller.vehicle_width,
         observation_history=config.decision.rl.observation_history,
@@ -455,8 +463,12 @@ def test_rl_supervisor_ood_forces_fallback_even_with_high_confidence() -> None:
         confidence_threshold=config.decision.rl.confidence_threshold,
         tau_enter=0.55,
         tau_exit=0.45,
+        tau_enter_start=config.decision.rl.tau_enter_start,
+        tau_exit_start=config.decision.rl.tau_exit_start,
+        gate_warmup_timesteps=config.decision.rl.gate_warmup_timesteps,
         ood_threshold=6.0,
         deterministic_eval=True,
+        checkpoint_timesteps_done=None,
         vehicle_length=config.controller.vehicle_length,
         vehicle_width=config.controller.vehicle_width,
         observation_history=config.decision.rl.observation_history,
@@ -473,6 +485,111 @@ def test_rl_supervisor_ood_forces_fallback_even_with_high_confidence() -> None:
     assert diagnostics.gate_reason == "ood_threshold"
     assert diagnostics.confidence_raw == pytest.approx(0.99)
     assert diagnostics.normalized_obs_max_abs > supervisor.ood_threshold
+
+
+def test_rl_supervisor_training_thresholds_anneal_monotonically() -> None:
+    thresholds = [
+        RLSupervisor._annealed_threshold(
+            start=0.25,
+            final=0.55,
+            timesteps_done=timesteps_done,
+            warmup_timesteps=20_000,
+        )
+        for timesteps_done in (0, 5_000, 10_000, 20_000, 40_000)
+    ]
+    exit_thresholds = [
+        RLSupervisor._annealed_threshold(
+            start=0.15,
+            final=0.45,
+            timesteps_done=timesteps_done,
+            warmup_timesteps=20_000,
+        )
+        for timesteps_done in (0, 5_000, 10_000, 20_000, 40_000)
+    ]
+
+    assert thresholds[0] == pytest.approx(0.25)
+    assert exit_thresholds[0] == pytest.approx(0.15)
+    assert thresholds[-2] == pytest.approx(0.55)
+    assert thresholds[-1] == pytest.approx(0.55)
+    assert exit_thresholds[-2] == pytest.approx(0.45)
+    assert exit_thresholds[-1] == pytest.approx(0.45)
+    assert thresholds == sorted(thresholds)
+    assert exit_thresholds == sorted(exit_thresholds)
+    for tau_enter, tau_exit in zip(thresholds, exit_thresholds, strict=True):
+        assert 0.0 <= tau_exit < tau_enter <= 1.0
+
+
+def test_rl_supervisor_uses_annealed_thresholds_only_for_non_deterministic_runtime() -> None:
+    config = _default_config()
+    scenario = ScenarioFactory(config=config).build(seed=0)
+    observation = Observation(
+        step_index=0,
+        time=0.0,
+        states=scenario.initial_states,
+        road=scenario.road,
+        goal_x=scenario.goal_x,
+        desired_offsets=scenario.desired_offsets,
+        obstacles=(),
+    )
+    normalizer = ObservationNormalizer(
+        mean=np.zeros(108, dtype=float),
+        std=np.full(108, 100.0, dtype=float),
+    )
+    policy = DummySequencePolicy(outputs=[((1.1, 1.1, 1.1, 0.1), 0.30)])
+
+    training_runtime = RLSupervisor(
+        fallback_fsm=_make_fsm(config),
+        policy=policy,
+        normalizer=normalizer,
+        constraints=config.decision.rl.theta,
+        confidence_threshold=config.decision.rl.confidence_threshold,
+        tau_enter=0.55,
+        tau_exit=0.45,
+        tau_enter_start=0.25,
+        tau_exit_start=0.15,
+        gate_warmup_timesteps=20_000,
+        ood_threshold=1e6,
+        deterministic_eval=False,
+        checkpoint_timesteps_done=0,
+        vehicle_length=config.controller.vehicle_length,
+        vehicle_width=config.controller.vehicle_width,
+        observation_history=config.decision.rl.observation_history,
+        interaction_limit=config.decision.rl.interaction_limit,
+    )
+    deterministic_runtime = RLSupervisor(
+        fallback_fsm=_make_fsm(config),
+        policy=DummySequencePolicy(outputs=[((1.1, 1.1, 1.1, 0.1), 0.30)]),
+        normalizer=normalizer,
+        constraints=config.decision.rl.theta,
+        confidence_threshold=config.decision.rl.confidence_threshold,
+        tau_enter=0.55,
+        tau_exit=0.45,
+        tau_enter_start=0.25,
+        tau_exit_start=0.15,
+        gate_warmup_timesteps=20_000,
+        ood_threshold=1e6,
+        deterministic_eval=True,
+        checkpoint_timesteps_done=0,
+        vehicle_length=config.controller.vehicle_length,
+        vehicle_width=config.controller.vehicle_width,
+        observation_history=config.decision.rl.observation_history,
+        interaction_limit=config.decision.rl.interaction_limit,
+    )
+
+    assert training_runtime._runtime_gate_thresholds() == pytest.approx((0.25, 0.15))
+    assert deterministic_runtime._runtime_gate_thresholds() == pytest.approx((0.55, 0.45))
+
+    training_decision = training_runtime.select(observation, 0)
+    training_diag = training_runtime.consume_step_diagnostics()
+    deterministic_decision = deterministic_runtime.select(observation, 0)
+    deterministic_diag = deterministic_runtime.consume_step_diagnostics()
+
+    assert training_decision.source == "rl"
+    assert training_diag.gate_open is True
+    assert training_diag.gate_reason == "accepted_enter"
+    assert deterministic_decision.source == "rl_fallback"
+    assert deterministic_diag.gate_open is False
+    assert deterministic_diag.gate_reason == "confidence_enter_threshold"
 
 
 def test_run_batch_with_rl_policy_is_deterministic_and_persists_rl_metrics(

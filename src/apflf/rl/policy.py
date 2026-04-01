@@ -60,6 +60,7 @@ class PolicyBundle:
 
     policy: PolicyProtocol | None
     normalizer: ObservationNormalizer
+    checkpoint_timesteps_done: int | None = None
 
 
 class ConstantThetaPolicy:
@@ -197,4 +198,5 @@ def load_policy_bundle(
     return PolicyBundle(
         policy=TorchBetaPolicy(network=network, theta_config=theta_config),
         normalizer=ObservationNormalizer(mean=normalizer_mean, std=normalizer_std),
+        checkpoint_timesteps_done=int(payload.get("timesteps_done", 0)),
     )

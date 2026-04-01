@@ -151,6 +151,9 @@ class RLDecisionConfig:
     confidence_threshold: float = 0.55
     tau_enter: float = 0.55
     tau_exit: float = 0.45
+    tau_enter_start: float = 0.25
+    tau_exit_start: float = 0.15
+    gate_warmup_timesteps: int = 20_000
     ood_threshold: float = 6.0
     observation_history: int = 5
     interaction_limit: int = 8

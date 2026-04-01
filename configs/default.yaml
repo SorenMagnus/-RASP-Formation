@@ -73,6 +73,9 @@ decision:
   stagnation_steps: 6
   recover_exit_steps: 4
   rl:
+    tau_enter_start: 0.25
+    tau_exit_start: 0.15
+    gate_warmup_timesteps: 20000
     reward:
       progress_weight: 1.25
       formation_weight: 0.15

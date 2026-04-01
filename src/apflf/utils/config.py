@@ -456,6 +456,14 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
 
     tau_enter = float(rl_raw.get("tau_enter", rl_raw.get("confidence_threshold", 0.55)))
     tau_exit = float(rl_raw.get("tau_exit", max(0.0, tau_enter - 0.10)))
+    tau_enter_start = float(rl_raw.get("tau_enter_start", 0.25))
+    tau_exit_start = float(rl_raw.get("tau_exit_start", 0.15))
+    gate_warmup_timesteps = int(
+        _require_positive(
+            float(rl_raw.get("gate_warmup_timesteps", 20_000)),
+            "decision.rl.gate_warmup_timesteps",
+        )
+    )
     reward_raw = _require_mapping(rl_raw.get("reward", {}), "decision.rl.reward")
     reward_config = RLRewardConfig(
         progress_weight=_require_non_negative(
@@ -510,6 +518,9 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
         confidence_threshold=tau_enter,
         tau_enter=tau_enter,
         tau_exit=tau_exit,
+        tau_enter_start=tau_enter_start,
+        tau_exit_start=tau_exit_start,
+        gate_warmup_timesteps=gate_warmup_timesteps,
         ood_threshold=float(rl_raw.get("ood_threshold", 6.0)),
         observation_history=int(
             _require_positive(
@@ -537,6 +548,16 @@ def _load_decision(raw: dict[str, Any]) -> DecisionConfig:
         raise ValueError("`decision.rl.tau_enter` must lie in (0, 1].")
     if not 0.0 <= rl_config.tau_exit < rl_config.tau_enter:
         raise ValueError("`decision.rl.tau_exit` must satisfy 0 <= tau_exit < tau_enter.")
+    if not 0.0 < rl_config.tau_enter_start <= 1.0:
+        raise ValueError("`decision.rl.tau_enter_start` must lie in (0, 1].")
+    if not 0.0 <= rl_config.tau_exit_start < rl_config.tau_enter_start:
+        raise ValueError(
+            "`decision.rl.tau_exit_start` must satisfy 0 <= tau_exit_start < tau_enter_start."
+        )
+    if rl_config.tau_enter_start > rl_config.tau_enter:
+        raise ValueError("`decision.rl.tau_enter_start` must not exceed `decision.rl.tau_enter`.")
+    if rl_config.tau_exit_start > rl_config.tau_exit:
+        raise ValueError("`decision.rl.tau_exit_start` must not exceed `decision.rl.tau_exit`.")
     if rl_config.ood_threshold < 0.0 or not math.isfinite(rl_config.ood_threshold):
         raise ValueError("`decision.rl.ood_threshold` must be finite and non-negative.")
 

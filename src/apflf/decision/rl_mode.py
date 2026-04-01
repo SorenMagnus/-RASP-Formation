@@ -46,8 +46,12 @@ class RLSupervisor(ModeDecisionModule):
         confidence_threshold: float,
         tau_enter: float,
         tau_exit: float,
+        tau_enter_start: float,
+        tau_exit_start: float,
+        gate_warmup_timesteps: int,
         ood_threshold: float,
         deterministic_eval: bool,
+        checkpoint_timesteps_done: int | None,
         vehicle_length: float,
         vehicle_width: float,
         observation_history: int,
@@ -60,12 +64,30 @@ class RLSupervisor(ModeDecisionModule):
         self.confidence_threshold = float(confidence_threshold)
         self.tau_enter = float(tau_enter)
         self.tau_exit = float(tau_exit)
+        self.tau_enter_start = float(tau_enter_start)
+        self.tau_exit_start = float(tau_exit_start)
+        self.gate_warmup_timesteps = int(gate_warmup_timesteps)
         self.ood_threshold = float(ood_threshold)
         self.deterministic_eval = bool(deterministic_eval)
+        self.checkpoint_timesteps_done = (
+            None if checkpoint_timesteps_done is None else int(checkpoint_timesteps_done)
+        )
         if not 0.0 < self.tau_enter <= 1.0:
             raise ValueError("`tau_enter` must lie in (0, 1].")
         if not 0.0 <= self.tau_exit < self.tau_enter:
             raise ValueError("`tau_exit` must satisfy 0 <= tau_exit < tau_enter.")
+        if not 0.0 < self.tau_enter_start <= 1.0:
+            raise ValueError("`tau_enter_start` must lie in (0, 1].")
+        if not 0.0 <= self.tau_exit_start < self.tau_enter_start:
+            raise ValueError("`tau_exit_start` must satisfy 0 <= tau_exit_start < tau_enter_start.")
+        if self.tau_enter_start > self.tau_enter:
+            raise ValueError("`tau_enter_start` must not exceed `tau_enter`.")
+        if self.tau_exit_start > self.tau_exit:
+            raise ValueError("`tau_exit_start` must not exceed `tau_exit`.")
+        if self.gate_warmup_timesteps <= 0:
+            raise ValueError("`gate_warmup_timesteps` must be positive.")
+        if self.checkpoint_timesteps_done is not None and self.checkpoint_timesteps_done < 0:
+            raise ValueError("`checkpoint_timesteps_done` must be non-negative when provided.")
         self.feature_builder = SupervisorObservationBuilder(
             vehicle_length=vehicle_length,
             vehicle_width=vehicle_width,
@@ -159,7 +181,8 @@ class RLSupervisor(ModeDecisionModule):
                 normalized_obs_max_abs=normalized_obs_max_abs,
             )
 
-        active_threshold = self.tau_exit if self._gate_open else self.tau_enter
+        tau_enter, tau_exit = self._runtime_gate_thresholds()
+        active_threshold = tau_exit if self._gate_open else tau_enter
         if confidence_raw < active_threshold:
             gate_reason = (
                 "confidence_exit_threshold" if self._gate_open else "confidence_enter_threshold"
@@ -192,6 +215,31 @@ class RLSupervisor(ModeDecisionModule):
             theta_clipped=theta_clipped,
             normalized_obs_max_abs=normalized_obs_max_abs,
         )
+
+    @staticmethod
+    def _annealed_threshold(*, start: float, final: float, timesteps_done: int, warmup_timesteps: int) -> float:
+        if timesteps_done >= warmup_timesteps:
+            return float(final)
+        progress = max(0.0, 1.0 - float(timesteps_done) / float(warmup_timesteps))
+        return float(final - (final - start) * progress)
+
+    def _runtime_gate_thresholds(self) -> tuple[float, float]:
+        if self.deterministic_eval or self.checkpoint_timesteps_done is None:
+            return (self.tau_enter, self.tau_exit)
+        timesteps_done = max(self.checkpoint_timesteps_done, 0)
+        tau_enter = self._annealed_threshold(
+            start=self.tau_enter_start,
+            final=self.tau_enter,
+            timesteps_done=timesteps_done,
+            warmup_timesteps=self.gate_warmup_timesteps,
+        )
+        tau_exit = self._annealed_threshold(
+            start=self.tau_exit_start,
+            final=self.tau_exit,
+            timesteps_done=timesteps_done,
+            warmup_timesteps=self.gate_warmup_timesteps,
+        )
+        return (tau_enter, tau_exit)
 
     def _normalize_observation(self, observation: np.ndarray) -> np.ndarray:
         observation = np.asarray(observation, dtype=float)

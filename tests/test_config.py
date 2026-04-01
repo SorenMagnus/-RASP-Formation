@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
+
 from apflf.utils.config import load_config
 
 
@@ -116,3 +118,54 @@ def test_load_config_parses_rl_reward_weights(tmp_path: Path) -> None:
     assert math.isclose(config.decision.rl.reward.collision_penalty, 11.0)
     assert math.isclose(config.decision.rl.reward.boundary_penalty, 9.0)
     assert math.isclose(config.decision.rl.reward.correction_epsilon, 1e-5)
+
+
+def test_load_config_parses_rl_gate_warm_start(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = tmp_path / "gate_warm_start.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"extends: { (repo_root / 'configs' / 'default.yaml').as_posix() }",
+                "decision:",
+                "  rl:",
+                "    tau_enter: 0.6",
+                "    tau_exit: 0.5",
+                "    tau_enter_start: 0.3",
+                "    tau_exit_start: 0.2",
+                "    gate_warmup_timesteps: 5000",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert math.isclose(config.decision.rl.tau_enter, 0.6)
+    assert math.isclose(config.decision.rl.tau_exit, 0.5)
+    assert math.isclose(config.decision.rl.tau_enter_start, 0.3)
+    assert math.isclose(config.decision.rl.tau_exit_start, 0.2)
+    assert config.decision.rl.gate_warmup_timesteps == 5000
+
+
+def test_load_config_rejects_invalid_rl_gate_warm_start(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = tmp_path / "invalid_gate_warm_start.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"extends: { (repo_root / 'configs' / 'default.yaml').as_posix() }",
+                "decision:",
+                "  rl:",
+                "    tau_enter: 0.55",
+                "    tau_exit: 0.45",
+                "    tau_enter_start: 0.65",
+                "    tau_exit_start: 0.20",
+                "    gate_warmup_timesteps: 1000",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="tau_enter_start"):
+        load_config(config_path)
