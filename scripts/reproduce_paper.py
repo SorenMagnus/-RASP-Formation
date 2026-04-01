@@ -318,6 +318,102 @@ def _build_manifest(
     }
 
 
+def _load_manifest(path: Path) -> dict[str, object]:
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest does not exist: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Manifest payload must be a JSON object: {path}")
+    return payload
+
+
+def _manifest_list_of_str(payload: dict[str, object], key: str) -> list[str]:
+    values = payload.get(key)
+    if not isinstance(values, list):
+        raise ValueError(f"Manifest field '{key}' must be a list.")
+    return [str(value) for value in values]
+
+
+def _manifest_list_of_int(payload: dict[str, object], key: str) -> list[int]:
+    values = payload.get(key)
+    if not isinstance(values, list):
+        raise ValueError(f"Manifest field '{key}' must be a list.")
+    normalized: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(f"Manifest field '{key}' contains a non-integer value: {value!r}")
+        if isinstance(value, int):
+            normalized.append(value)
+            continue
+        if isinstance(value, float) and float(value).is_integer():
+            normalized.append(int(value))
+            continue
+        raise ValueError(f"Manifest field '{key}' contains a non-integer value: {value!r}")
+    return normalized
+
+
+def _manifest_expected_cells(payload: dict[str, object]) -> list[dict[str, object]]:
+    values = payload.get("expected_cells")
+    if not isinstance(values, list):
+        raise ValueError("Manifest field 'expected_cells' must be a list.")
+    required_keys = (
+        "scenario",
+        "method",
+        "variant_type",
+        "variant_name",
+        "run_id",
+        "config_path",
+        "output_dir",
+    )
+    normalized: list[dict[str, object]] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError(f"Manifest expected_cells[{index}] must be an object.")
+        missing_keys = [key for key in required_keys if key not in value]
+        if missing_keys:
+            raise ValueError(
+                f"Manifest expected_cells[{index}] is missing required keys: {', '.join(missing_keys)}"
+            )
+        normalized.append({key: value[key] for key in required_keys})
+    return normalized
+
+
+def _resolve_audit_spec(
+    *,
+    paper_dir: Path,
+    exp_id: str,
+    canonical_matrix: bool,
+) -> tuple[bool, list[int], list[str], list[str], list[str], list[dict[str, object]]]:
+    manifest_path = paper_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = _load_manifest(manifest_path)
+        return (
+            bool(manifest.get("canonical_matrix", False)),
+            _manifest_list_of_int(manifest, "expected_seeds"),
+            _manifest_list_of_str(manifest, "expected_scenarios"),
+            _manifest_list_of_str(manifest, "expected_methods"),
+            _manifest_list_of_str(manifest, "expected_ablations"),
+            _manifest_expected_cells(manifest),
+        )
+
+    if canonical_matrix:
+        scenarios = list(CANONICAL_SCENARIOS)
+        methods = list(CANONICAL_METHODS)
+        ablations = list(ABLATION_CONFIGS)
+        expected_seeds = list(CANONICAL_SEEDS)
+        expected_cells = _expected_cells(
+            paper_exp_id=exp_id,
+            scenarios=scenarios,
+            methods=methods,
+            ablations=ablations,
+        )
+        return True, expected_seeds, scenarios, methods, ablations, expected_cells
+
+    raise FileNotFoundError(
+        "Manifest-driven audit requires an existing manifest.json or explicit --canonical-matrix."
+    )
+
+
 def _infer_unexpected_cell_from_run_id(run_id: str) -> dict[str, object]:
     scenario_name, _, remainder = run_id.partition("__")
     if "__adaptive_apf__" in run_id:
@@ -518,14 +614,52 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    repo_root = Path(__file__).resolve().parents[1]
+    paper_dir = repo_root / "outputs" / args.exp_id
+    if args.status_only or args.validate_only:
+        try:
+            (
+                resolved_canonical_matrix,
+                resolved_seeds,
+                resolved_scenarios,
+                resolved_methods,
+                resolved_ablations,
+                resolved_expected_cells,
+            ) = _resolve_audit_spec(
+                paper_dir=paper_dir,
+                exp_id=args.exp_id,
+                canonical_matrix=bool(args.canonical_matrix),
+            )
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        _, _, acceptance, progress = _write_sealed_artifacts(
+            repo_root=repo_root,
+            paper_dir=paper_dir,
+            exp_id=args.exp_id,
+            canonical_matrix=resolved_canonical_matrix,
+            expected_seeds=resolved_seeds,
+            scenarios=resolved_scenarios,
+            methods=resolved_methods,
+            ablations=resolved_ablations,
+            expected_cells=resolved_expected_cells,
+        )
+        _print_bundle_audit_summary(
+            paper_dir=paper_dir,
+            progress=progress,
+            acceptance=acceptance,
+        )
+        if args.validate_only:
+            bundle_valid = bool(acceptance["bundle_complete"]) and bool(acceptance["primary_safety_valid"])
+            return 0 if bundle_valid else 1
+        return 0
+
     if args.canonical_matrix:
         args.seeds = list(CANONICAL_SEEDS)
         args.scenarios = list(CANONICAL_SCENARIOS)
         args.methods = list(CANONICAL_METHODS)
         args.ablations = list(ABLATION_CONFIGS)
 
-    repo_root = Path(__file__).resolve().parents[1]
-    paper_dir = repo_root / "outputs" / args.exp_id
     generated_dir = paper_dir / "generated_configs"
     expected_cells = _expected_cells(
         paper_exp_id=args.exp_id,
@@ -544,28 +678,6 @@ def main(argv: list[str] | None = None) -> int:
         ablations=list(args.ablations),
         expected_cells=expected_cells,
     )
-    if args.status_only or args.validate_only:
-        _, _, acceptance, progress = _write_sealed_artifacts(
-            repo_root=repo_root,
-            paper_dir=paper_dir,
-            exp_id=args.exp_id,
-            canonical_matrix=bool(args.canonical_matrix),
-            expected_seeds=list(args.seeds),
-            scenarios=list(args.scenarios),
-            methods=list(args.methods),
-            ablations=list(args.ablations),
-            expected_cells=expected_cells,
-        )
-        _print_bundle_audit_summary(
-            paper_dir=paper_dir,
-            progress=progress,
-            acceptance=acceptance,
-        )
-        if args.validate_only:
-            bundle_valid = bool(acceptance["bundle_complete"]) and bool(acceptance["primary_safety_valid"])
-            return 0 if bundle_valid else 1
-        return 0
-
     for scenario_name in args.scenarios:
         scenario_path = _scenario_config_path(repo_root, scenario_name)
         if not scenario_path.exists():

@@ -1,39 +1,56 @@
-# AI_MEMORY - 当前周期交接文档
+﻿# AI_MEMORY - 当前周期交接文档
 
-> 下一个 AI / 工程师启动后，先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动代码。
-> 本文件按 `2026-04-01` 的真实仓库状态重写；旧版 AI_MEMORY 中关于“下一步去补 `status-only / validate-only`”的叙述已经过期，因为那部分代码本轮已经完成。
+> 下一位 AI / 工程师启动后，先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动代码。  
+> 本文件按 `2026-04-02` 的真实仓库状态重写；旧版 AI_MEMORY 中关于 dirty worktree、旧 `HEAD`、以及“下一步去补 `status-only / validate-only`”的描述都已经过期。
 
 ---
 
 ## 0. 当前开发游标
 
 - 日期：
-  - `2026-04-01`
+  - `2026-04-02`
 - Git 游标：
-  - `HEAD = 4360a95786611575a61d34ebe2dbb0311ea2b776`
+  - `HEAD = de0cf46ce6a2f11ee1a14132a88c82b2601e662a`
 - 当前工作树：
-  - 当前 repo-tracked 改动有 `4` 个文件：
-    - `AI_MEMORY.md`
+  - 在本次重写 `AI_MEMORY.md` 之前，repo-tracked 改动只有 `2` 个文件：
     - `scripts/reproduce_paper.py`
-    - `src/apflf/analysis/stats.py`
-    - `tests/test_stats_export.py`
-  - 当前 untracked 文件有 `1` 个：
     - `tests/test_reproduce_paper.py`
+  - 本文件重写后，`AI_MEMORY.md` 也会进入 modified 状态
 - 当前后台进程：
-  - 当前没有活动中的 `train_rl_supervisor.py`
-  - 当前没有活动中的 `benchmark_s5_rl.py`
-  - 当前没有活动中的 `reproduce_paper.py`
-  - 当前仅看到 VS Code / language server 相关 `python` 进程，不属于实验运行
-- 当前论文主线：
-  - 正文主方法仍然是白盒主链 `FSM + adaptive_apf + CBF-QP`
-  - `rl_param_only` 仍然只是“附录增强 / 可选增强候选”，不是正文主方法
-  - `outputs/paper_canonical` 当前仍不存在，说明 canonical artifact 还没有真正落盘
-- 当前 RL 结论游标：
-  - 当前官方最新 RL 结论仍来自：
+  - 当前有一个正在运行的正文 canonical 长跑：
+    - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
+  - 当前观察到的运行日志：
+    - `outputs/paper_canonical_run_stdout.log`
+    - `outputs/paper_canonical_run_stderr.log`
+  - `stdout` 目前仍为空
+  - `stderr` 目前只有 CBF-QP / fallback 警告，没有看到致命 traceback
+- 当前正文 artifact 游标：
+  - `outputs/paper_canonical` 已经创建
+  - 当前已存在这些 bundle 产物：
+    - `outputs/paper_canonical/manifest.json`
+    - `outputs/paper_canonical/run_progress.json`
+    - `outputs/paper_canonical/cell_progress.csv`
+    - `outputs/paper_canonical/matrix_index.csv`
+    - `outputs/paper_canonical/paper_acceptance.json`
+  - 但截至本文件重写时，canonical 进度仍是：
+    - `bundle_progress = 0.0`
+    - `num_expected_cells = 55`
+    - `num_complete_cells = 0`
+    - `remaining_cell_count = 55`
+  - 当前只看到第一个 cell 已进入运行前状态：
+    - `outputs/paper_canonical/generated_configs/s1_local_minima__method__no_rl.yaml`
+    - `outputs/paper_canonical/runs/s1_local_minima__no_rl/`
+  - 该 cell 当前尚未落盘 `summary.csv`
+- 当前正文主线：
+  - 正文主方法仍然是白盒主链：`FSM + adaptive_apf + CBF-QP`
+  - `paper_canonical` 只应包含 white-box 正文矩阵
+- 当前 RL 游标：
+  - RL 仍然只保留为附录增强候选，不是正文主方法
+  - 当前官方 RL 结论仍来自：
     - `outputs/s5_rl_gate_warmstart_smoke__no_rl/summary.csv`
     - `outputs/s5_rl_gate_warmstart_smoke__rl_param_only/summary.csv`
     - `outputs/s5_rl_gate_warmstart_smoke__rl_param_only/analysis/rl_attribution/aggregate.json`
-  - 本轮没有新的 RL 算法结论，仍保持：
+  - 当前 RL 关键结论继续保持：
     - `dominant_bottleneck = safety_engagement`
     - `rl_fallback_ratio_mean = 0.043939393939393945`
     - `gate_open_ratio_mean = 0.956060606060606`
@@ -44,19 +61,14 @@
 
 ### 当前最重要的结论
 
-- RL 这一条线的研究判断已经足够清楚：
-  - warm-start 和 effective-threshold 持久化已经解决了“完全进不了 gate”的结构性问题
+- RL 这条线的工程诊断已经足够清楚：
+  - warm-start 与 effective-threshold 持久化已经解决了“完全进不了 gate”的结构问题
   - 但 multi-seed 效率仍劣于 `no_rl`
   - 因此 RL 当前不应继续绑架正文主线
-- 当前真正还没收口的不是算法，而是 **white-box canonical artifact 闭环**
-- 本轮已经把 `paper_canonical` 所需的：
-  - `validator`
-  - `manifest sealing`
-  - `incremental progress ledger`
-  - `status-only / validate-only`
-  都写出来了
-- 但 `outputs/paper_canonical` 仍然缺失，因为真正的 canonical matrix 还没有正式跑完
-- 更关键的是：当前 `status-only / validate-only` 虽然已经存在，但**还没有做到 manifest 驱动的规范恢复**；如果调用者不传 `--canonical-matrix`，它会回退到 parser 默认 `seeds=[0,1,2]`，这对 `paper_canonical` 的纯磁盘验收是不安全的
+- 当前真正还没收口的，不是算法，而是 **white-box canonical artifact 闭环**
+- `manifest / matrix_index / paper_acceptance / run_progress / cell_progress / status-only / validate-only` 这些代码链路已经具备
+- 但正文 canonical 真实长跑才刚启动，仍未产生任何完整 cell 的 `summary.csv`
+- 也就是说，当前最紧迫的剩余问题已经从“功能缺失”变成了“长时间 canonical 运行的运行态可观测性不足”
 
 ---
 
@@ -66,7 +78,7 @@
 
 - gatefix 已完成：
   - `confidence_raw` 使用 Beta 方差校准
-  - 两阈值滞回 gate 已经在位
+  - 两阈值滞回 gate 已在位
 - reward_v2 已完成：
   - reward shaping
   - reward 配置化
@@ -79,145 +91,103 @@
   - runtime diagnostics
   - replay
   - RL attribution
-- RL 路线当前已经完成“能否真正介入 nominal layer”的工程诊断任务：
+- RL 路线当前已经完成“它能否真实介入 nominal layer”的工程诊断任务：
   - 可以进 gate
-  - 但 multi-seed 仍不优于白盒 baseline
+  - 但 multi-seed 结果仍不优于 white-box baseline
 
-### 1.2 本轮源码实现：canonical sealing / progress ledger / pure-disk audit 已落地
-
-- `src/apflf/analysis/stats.py`
-  - 已有 `validate_canonical_bundle(...)`
-  - 已有 `summarize_canonical_progress(...)`
-  - 当前 bundle 级字段已经包括：
-    - `status`
-    - `progress_ratio`
-    - `actual_seed_count`
-    - `complete`
-    - `bundle_complete`
-    - `primary_safety_valid`
-    - `remaining_cell_count`
-    - `bundle_progress`
-  - validator / progress 链路当前能显式检查与汇总：
-    - canonical seed completeness
-    - `config_hash` consistency
-    - paired seed alignment coverage
-    - missing / invalid / unexpected cells
-    - bundle 级进度与完成状态
-  - 现有 deterministic bootstrap CI 默认口径没有被改动
+### 1.2 本轮源码实现：manifest-first canonical audit 已完成
 
 - `scripts/reproduce_paper.py`
-  - 已支持测试友好的入口：
-    - `main(argv: list[str] | None = None)`
-  - 已补齐磁盘重建相关辅助函数：
-    - `_collect_disk_rows(...)`
-    - `_cell_progress_rows(...)`
-    - `_write_sealed_artifacts(...)`
-    - `_print_bundle_audit_summary(...)`
-  - 当前脚本会在启动时和每个 cell 完成后：
-    - 从磁盘重建当前 bundle 状态
-    - 写出 `run_progress.json`
-    - 写出 `cell_progress.csv`
-    - 刷新 `manifest.json`
-    - 刷新 `matrix_index.csv`
-    - 刷新 `paper_acceptance.json`
-  - `--skip-existing` 当前已经基于磁盘真值恢复进度，而不是依赖内存缓存
-  - 本轮新增了纯磁盘 CLI 模式：
-    - `--status-only`
-    - `--validate-only`
-  - 这两个模式当前已经满足：
-    - 不启动 simulation / benchmark / training
-    - 只读磁盘 bundle
-    - 刷新并输出 ledger / acceptance
-    - `validate-only` 按 bundle 完整性和 `primary_safety_valid` 返回退出码
-  - 当前 sealing / audit 产物链路已经包括：
-    - `manifest.json`
-    - `matrix_index.csv`
-    - `paper_acceptance.json`
-    - `run_progress.json`
-    - `cell_progress.csv`
-
-- `tests/test_stats_export.py`
-  - 已新增 / 扩展 validator 测试
-  - 已覆盖：
-    - missing seeds
-    - `config_hash` mismatch
-    - `status`
-    - `progress_ratio`
-    - `bundle_progress`
-    - invalid / incomplete bundle 报告
-
+  - 已新增并落地 manifest-first audit helper：
+    - `_load_manifest(...)`
+    - `_manifest_list_of_str(...)`
+    - `_manifest_list_of_int(...)`
+    - `_manifest_expected_cells(...)`
+    - `_resolve_audit_spec(...)`
+  - `--status-only` / `--validate-only` 当前已改为：
+    1. 若 `outputs/<exp_id>/manifest.json` 存在，则必须优先从 manifest 恢复 canonical spec
+    2. 若 manifest 不存在但显式传了 `--canonical-matrix`，才允许退回 canonical 常量
+    3. 若 manifest 不存在且也没传 `--canonical-matrix`，则明确失败
+  - 缺 manifest 时，`main()` 当前会：
+    - 向 `stderr` 打印：
+      - `Manifest-driven audit requires an existing manifest.json or explicit --canonical-matrix.`
+    - 返回语义码 `2`
+  - `--status-only` / `--validate-only` 继续保持纯磁盘语义：
+    - 不触发 simulation
+    - 不触发 benchmark
+    - 不触发 export 子运行
+    - 只读取 `outputs/<exp_id>/...` 的现有 bundle 状态
 - `tests/test_reproduce_paper.py`
-  - 本轮新建并继续扩展
-  - 当前已覆盖：
-    - `manifest.json` 生成
-    - `matrix_index.csv` 生成
-    - `paper_acceptance.json` 生成
-    - `run_progress.json` 生成
-    - `cell_progress.csv` 生成
-    - partial bundle / invalid bundle 分支
-    - `--skip-existing` 从磁盘恢复进度
-    - `--status-only` 不触发新 run
-    - `--validate-only` 在 incomplete / invalid bundle 下返回非零
-    - `--validate-only` 在完整 bundle 下返回零
+  - 本轮已补齐 manifest-first 覆盖：
+    - manifest 存在时，audit 必须按 manifest.expected_seeds / expected_cells 计算
+    - manifest 缺失且未传 `--canonical-matrix` 时，audit 必须失败
+    - `--status-only` 重复执行必须幂等
+    - `--validate-only` 在 incomplete / invalid bundle 下非零，在 complete + primary-safe 下为零
 
-### 1.3 本轮验证状态
+### 1.3 本轮真实命令线验证已完成
 
-- 本轮已重新验证：
+- 已重新验证：
   - `python -m compileall src tests scripts` 通过
   - `python -m pytest -q tests/test_stats_export.py tests/test_reproduce_paper.py` 通过
-    - 当前结果：`14 passed`
+    - 当前结果：`16 passed`
   - `python -m pytest -q tests/test_offline_reporting.py` 通过
     - 当前结果：`2 passed`
-- 当前可信的结论是：
-  - 与本轮改动直接相关的 canonical sealing / progress ledger / pure-disk audit 链路是绿的
-  - 本轮直接相关的定向测试合计 `16 passed`
-- 需要诚实记录：
-  - 本轮 fresh `python -m pytest -q` 没有完整跑到结束
-  - 之前的 full-suite rerun 曾在约 `10` 分钟处超时并被停止
+- 当前可信的定向验证基线：
+  - 与本轮改动直接相关的测试链路合计 `18 passed`
+- 还需诚实记录：
+  - 本轮没有 fresh rerun 完整 `python -m pytest -q`
   - 因此不要宣称“本轮 full-suite fresh rerun 全绿”
 
-### 1.4 本轮运行验证与残留状态
+### 1.4 本轮真实运行状态：`paper_canonical` 已正式启动
 
-- 当前还没有正式的 `paper_canonical` 运行产物
-- 也就是说：
-  - canonical sealing / ledger / audit 代码已经准备好
-  - 但真正的 `outputs/paper_canonical` 仍不存在
-- 当前没有后台残留 canonical 运行
-- 当前没有半成品 smoke 输出需要清理
+- 已正式启动正文 canonical 长跑：
+  - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
+- 启动后，以下真实状态已被确认：
+  - `outputs/paper_canonical` 已存在
+  - `manifest.json` 已生成
+  - `run_progress.json` 已生成
+  - `cell_progress.csv` 已生成
+  - `matrix_index.csv` 已生成
+  - `paper_acceptance.json` 已生成
+- 已确认新的 manifest-first audit 在真实磁盘 bundle 上可工作：
+  - `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
+    - 在 **不传** `--canonical-matrix` 的情况下，仍能从磁盘 manifest 恢复 `55` 个 expected cells
+  - `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
+    - 在当前 bundle 尚未完成的情况下，按预期给出“不通过”的逻辑结果
+- 截至本文件重写时，canonical 的实际运行状态是：
+  - 第一个 cell `s1_local_minima__no_rl` 已创建 output 目录
+  - 但还没有任何一个 `summary.csv` 真正落盘
+  - 因此 `bundle_progress` 仍为 `0.0`
 
 ---
 
 ## 2. 当前研究判断
 
-- 当前项目的真实状态不是“缺算法模块”，而是“白盒论文闭环只差最后一公里”
-- 这一公里现在分成三个层次：
-  1. 代码层已经补到位：
-     - validator 有了
-     - manifest 有了
-     - acceptance sealing 有了
-     - progress ledger 有了
-     - `status-only / validate-only` 有了
-  2. 纯磁盘审计仍差一个规范恢复缺口：
-     - 当前 audit 模式还没有把 `manifest.json` 当成唯一的 canonical spec 来源
-     - 如果用户直接运行：
-       - `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
-       - `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
-       在没有 `--canonical-matrix` 的情况下，脚本会按 parser 默认 `seeds=[0,1,2]`、默认 methods / ablations 解释 bundle
-     - 这会让纯磁盘验收结果依赖 CLI 默认值，而不是依赖磁盘真值
-  3. artifact 层还没落盘：
-     - `paper_canonical` 还没真正运行完成
-     - 因此还没有唯一、可验收、可恢复的最终 bundle
+- 当前项目不是“还差算法模块”，而是“还差正文 canonical 真正跑完并通过 acceptance”
+- 本轮之前的主要代码缺口是：
+  - `status-only / validate-only` 还没有做到 manifest-first
+- 这个缺口现在已经补完
+- 因此当前剩余问题不再是：
+  - RL reward
+  - RL gate
+  - warm-start 公式
+  - canonical sealing 本身
+- 当前真正的剩余工程风险，已经变成：
+  - **长时间 canonical 运行时，纯磁盘 ledger 在第一个 `summary.csv` 落盘之前无法区分“正在运行”与“已经卡住”**
 
-- RL 分支当前的研究地位必须继续保持：
-  - 它已经完成了“证明自己能不能真正介入 nominal layer”的任务
-  - 但 multi-seed 结果已经证明它目前不优于 white-box baseline
-  - 因此近期不要再把机器时间优先花在 RL 局部调参上
+更直白地说：
 
-- 本轮之后，真正合理的路线是：
-  1. 不再新增 RL 算法修改
-  2. 先把 canonical 审计入口做成 **manifest 驱动**
-  3. 然后正式跑 `paper_canonical`
-  4. 最后以 `paper_acceptance.json` 为唯一验收入口收口正文主线
+- 现在 `paper_canonical` 已经开跑
+- 但 `run_progress.json` 目前只能告诉我们：
+  - `bundle_progress = 0.0`
+  - 所有 cell 仍是 missing / incomplete
+- 它还不能显式告诉我们：
+  - 当前是否有一个 cell 正在运行
+  - 当前正在跑哪一个 cell
+  - 当前这一个 cell 已经跑了多久
+  - 当前是否已经“长时间无 heartbeat”
+
+也就是说，当前下一段真正值得写的代码，不是再去碰算法，而是给 canonical 长跑补 **运行态 heartbeat / running-cell journal**。
 
 ---
 
@@ -225,255 +195,235 @@
 
 ### 3.1 总原则
 
-下一个工程师启动 AI 后：
+下一位工程师启动 AI 后：
 
 - 不要再改 RL reward
 - 不要再改 RL gate
 - 不要再改 warm-start 公式
 - 不要再把 RL 当成当前主任务
-- 不要重复写已经完成的 `progress ledger`
-- 不要重复写已经完成的 `status-only / validate-only`
-- 下一条立即执行的代码任务，必须围绕 **manifest 驱动的 canonical spec 恢复** 展开
+- 不要重复重写 manifest-first audit
+- 不要删除当前正在运行的 `outputs/paper_canonical`
+
+下一条立即执行的代码任务，应围绕 **white-box canonical 长跑的运行态 heartbeat / running-cell journal** 展开。
 
 ### 3.2 立即执行的代码任务
 
-在以下文件中实现 **manifest-driven audit bootstrap / canonical spec recovery**：
+在以下文件中实现 **canonical runtime heartbeat / running-cell journal**：
 
 - `scripts/reproduce_paper.py`
 - `tests/test_reproduce_paper.py`
-- 如确有必要，再最小增量修改：
-  - `src/apflf/analysis/stats.py`
-  - `tests/test_stats_export.py`
 
-优先复用现有：
+如确有必要，再最小增量触碰：
+
+- `src/apflf/analysis/stats.py`
+- `tests/test_stats_export.py`
+
+优先复用当前已有能力：
 
 - `_write_sealed_artifacts(...)`
 - `_collect_disk_rows(...)`
 - `validate_canonical_bundle(...)`
 - `summarize_canonical_progress(...)`
+- 当前已有的 `manifest.json`
+- 当前已有的 `run_progress.json`
+- 当前已有的 `cell_progress.csv`
 
-不要再新增一套平行 audit 逻辑。
+不要另起一套平行 canonical validator。
 
-### 3.3 这段代码必须完成什么
+### 3.3 这段代码必须产出什么
 
-当前已经有：
+为 `outputs/<exp_id>/` 新增并维护下面两类运行态产物：
 
-- `--status-only`
-- `--validate-only`
+- `run_runtime_state.json`
+- `cell_runtime_state.csv`
 
-但它们还不够“纯 canonical”，因为它们目前仍依赖 parser 默认：
+这两类产物的职责是：
 
-- `seeds=[0,1,2]`
-- 默认 scenarios
-- 默认 methods
-- 默认 ablations
+- 在 **第一个 `summary.csv` 落盘之前**，也能让操作者知道 canonical 长跑是不是还活着
+- 显式记录：
+  - 当前是否有 cell 正在运行
+  - 当前正在运行哪个 cell
+  - 该 cell 的开始时间
+  - 最近一次 heartbeat 时间
+  - 当前 cell 的运行状态
 
-这对 `paper_canonical` 是不安全的。  
-因此下一条代码任务必须把 audit 模式改成下面的优先级：
+### 3.4 必须满足的状态机与数学约束
 
-#### A. manifest 存在时
+记：
 
-若 `outputs/<exp_id>/manifest.json` 存在，且当前运行的是：
+- `S = manifest.expected_seeds`
+- `C = manifest.expected_cells`
+- `|S| = 30`
+- `|C| = 55`
 
-- `--status-only`
-- 或 `--validate-only`
+对任意时刻 `t`、任意 cell `c ∈ C`，定义：
 
-则必须：
+- `completed_seed_count_t(c)`：
+  - 从磁盘上已经落盘的 `summary.csv` 中读出的已完成 seed 数
+- `completed_progress_t(c) = completed_seed_count_t(c) / |S|`
+- `bundle_completed_progress_t = (1 / (|C| * |S|)) * Σ_c completed_seed_count_t(c)`
 
-- 直接从 `manifest.json` 恢复：
-  - `canonical_matrix`
-  - `expected_seeds`
-  - `expected_scenarios`
-  - `expected_methods`
-  - `expected_ablations`
-  - `expected_cells`
-- 这些恢复值必须覆盖 parser 默认值
-- 此时 CLI 中显式传入的默认矩阵参数不应影响 acceptance 结果
+必须满足：
 
-#### B. manifest 不存在时
+- `0 <= completed_seed_count_t(c) <= |S|`
+- `0 <= completed_progress_t(c) <= 1`
+- `0 <= bundle_completed_progress_t <= 1`
+- 在不删除已有结果的前提下：
+  - `completed_seed_count_t(c)` 对 `t` 单调不减
+  - `completed_progress_t(c)` 对 `t` 单调不减
+  - `bundle_completed_progress_t` 对 `t` 单调不减
 
-若 audit 模式下 `manifest.json` 不存在：
+新增运行态状态机：
 
-- 若显式传了 `--canonical-matrix`
-  - 允许用 canonical constants 构造 expected spec
-- 否则必须：
-  - 明确失败
-  - 返回非零退出码
-  - 并提示：
-    - 需要现有 manifest
-    - 或显式传入 `--canonical-matrix`
+- `runtime_status_t(c) ∈ {pending, running, complete, failed}`
 
-也就是说，不能再 silent 地回退到 parser 默认 `seeds=[0,1,2]` 来“假装完成验收”。
+并约束：
 
-### 3.4 数学与状态约束
+- `running_cell_count_t = |{ c ∈ C : runtime_status_t(c) = running }|`
+- 由于 `reproduce_paper.py` 当前按 cell 串行执行，必须始终满足：
+  - `running_cell_count_t ∈ {0, 1}`
 
-这些约束必须原样执行：
+新增 heartbeat 相关量：
 
-#### A. manifest 为 source of truth 时
+- `started_at_t(c)`：cell 开始运行时间
+- `last_heartbeat_t(c)`：最近一次 heartbeat 时间
+- `finished_at_t(c)`：cell 完成或失败时间
+- `heartbeat_age_t(c) = max(0, now_t - last_heartbeat_t(c))`
 
-- 若 manifest 存在，记：
-  - `S_manifest = manifest.expected_seeds`
-  - `C_manifest = manifest.expected_cells`
-- 对任意 canonical cell `c ∈ C_manifest`：
-  - `Seeds(c) = 从磁盘 summary.csv 读到的唯一 seed 集合`
-  - `observed_seed_count(c) = |Seeds(c) ∩ S_manifest|`
-  - `progress_ratio(c) = observed_seed_count(c) / |S_manifest|`
-- 必须满足：
-  - `0 <= progress_ratio(c) <= 1`
-  - audit 结果不得依赖 parser 默认 seed 集合
+默认 stall 阈值固定为：
 
-#### B. bundle 进度定义固定
+- `H = 900` 秒
 
-- 令 `C = C_manifest`
-- 定义：
-  - `bundle_progress = (1 / (|C| * |S_manifest|)) * Σ_c observed_seed_count(c)`
-- 必须满足：
-  - `0 <= bundle_progress <= 1`
-  - 在不删除已有结果前提下，`bundle_progress` 单调不减
-  - `bundle_progress = 1` 当且仅当所有 `c ∈ C` 达到 `complete`
+定义：
 
-#### C. 审计幂等性约束
+- `stalled_t(c) = 1[runtime_status_t(c) = running and heartbeat_age_t(c) > H]`
 
-- 对同一个磁盘状态，重复执行：
-  - `python scripts/reproduce_paper.py --exp-id <exp_id> --status-only`
-  - `python scripts/reproduce_paper.py --exp-id <exp_id> --validate-only`
-- 若磁盘 bundle 没变，则输出的：
+必须满足：
+
+- 当 cell 刚进入运行时：
+  - `runtime_status = running`
+  - `started_at = last_heartbeat`
+- 当 cell 正常完成时：
+  - `runtime_status: running -> complete`
+  - `finished_at` 必须写入
+- 当 cell 运行异常退出时：
+  - `runtime_status: running -> failed`
+  - `finished_at` 必须写入
+- `status-only` 必须基于纯磁盘同时输出：
+  - `bundle_completed_progress`
+  - `running_cell_count`
+  - `running / complete / failed / pending` 的 cell 数量
+  - 若存在运行中 cell，则输出其：
+    - `scenario`
+    - `variant_type`
+    - `variant_name`
+    - `heartbeat_age_seconds`
+    - `stalled`
+
+重要约束：
+
+- `validate-only` 的 acceptance 口径 **不能** 因 heartbeat 而放松
+- 也就是说：
+  - `bundle_complete` 仍然只能由已完成并落盘的 `summary.csv` 决定
+  - 运行中 cell 不能被算成 complete
+
+### 3.5 下一轮测试要求
+
+必须新增并通过以下测试：
+
+- `runtime_state` 文件生成测试：
+  - 启动一个 partial canonical run 时，`run_runtime_state.json` 与 `cell_runtime_state.csv` 必须生成
+- 串行状态机测试：
+  - 任意时刻 `running_cell_count ∈ {0, 1}`
+- heartbeat / stall 判定测试：
+  - `heartbeat_age_seconds > 900` 时，`stalled = true`
+  - 否则 `stalled = false`
+- 幂等性测试：
+  - 对同一磁盘状态重复执行 `--status-only`
   - `run_progress.json`
   - `cell_progress.csv`
+  - `run_runtime_state.json`
+  - `cell_runtime_state.csv`
   - `matrix_index.csv`
   - `paper_acceptance.json`
-  的**数据内容**必须不变
-- 即 audit 入口必须是 deterministic / idempotent 的纯磁盘函数
+  数据内容必须稳定一致
+- acceptance 不变性测试：
+  - 即使 runtime state 显示 `running`
+  - 若 `summary.csv` 尚未完整，则 `validate-only` 仍必须失败
 
-#### D. 状态与 acceptance 约束继续不变
+### 3.6 下一轮运行与验收顺序
 
-- `status(c)` 继续按现有规则：
-  - `missing`：`observed_seed_count = 0`
-  - `partial`：`0 < observed_seed_count < |S_manifest|` 且无 invalid 条件
-  - `invalid`：duplicate seeds / unexpected seeds / `config_hash_consistent = false`
-  - `complete`：`Seeds(c) = S_manifest` 且 `config_hash_consistent = true`
-- `bundle_complete = true` 当且仅当所有 expected cells 都是 `complete`
-- `primary_safety_valid = true` 当且仅当 primary method=`no_rl` 在每个 scenario 上：
-  - `Σ collision_count = 0`
-  - `Σ boundary_violation_count = 0`
+下一位工程师应按这个顺序继续：
 
-#### E. 输出顺序与接口约束
+1. 先检查当前 `paper_canonical` 进程是否仍在运行
+2. 若仍在运行，不要删除现有 `outputs/paper_canonical`
+3. 先实现 runtime heartbeat / running-cell journal
+4. 通过以下验证：
+   - `python -m compileall src tests scripts`
+   - `python -m pytest -q tests/test_stats_export.py tests/test_reproduce_paper.py`
+5. 然后再继续/恢复正文 canonical：
+   - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
+6. 再执行：
+   - `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
+   - `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
 
-- `status-only / validate-only` 都必须是纯磁盘函数：
-  - 不允许启动 simulation / benchmark / export 子运行
-  - 不允许依赖内存缓存恢复状态
-- invalid / missing / unexpected cells 的输出顺序必须稳定：
-  - 按 `(scenario, variant_type, variant_name, method)` 排序
-- 默认统计口径继续保持：
-  - reference method = `no_rl`
-  - paired delta 只允许同 seed 配对
-  - 默认主表 CI 继续使用 deterministic bootstrap
-  - 不允许把默认主表 CI 改回 t-interval
-
-### 3.5 下一轮执行顺序
-
-#### A. 先写 manifest-driven audit bootstrap 并补测试
-
-必须覆盖：
-
-- manifest 存在时：
-  - `--status-only` 直接按 manifest.expected_seeds / expected_cells 验收
-  - 不依赖 parser 默认 `[0,1,2]`
-- manifest 不存在时：
-  - `--status-only` / `--validate-only` 在无 `--canonical-matrix` 情况下非零失败
-- `--validate-only` 退出码继续正确：
-  - incomplete / invalid 非零
-  - complete + primary-safe 为零
-- 重复运行 audit 时，磁盘输出内容稳定
-
-#### B. 再正式运行 canonical matrix
-
-运行：
-
-- `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
-
-注意：
-
-- 这一步只跑 white-box canonical matrix
-- 不要把 RL method 混进 canonical bundle
-- RL 分支此时不应继续阻塞正文 artifact 落盘
-
-#### C. 再做 manifest-driven 纯磁盘验收
-
-至少执行：
-
-- `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
-- `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
-
-并确保此时即便**不再传 `--canonical-matrix`**，脚本也会基于磁盘 manifest 做正确验收。
-
-#### D. 下一轮验收标准
-
-只有满足以下条件，才算 white-box 论文闭环真正进入最终冲刺：
+最终验收标准仍固定为：
 
 - `outputs/paper_canonical` 存在
-- `--status-only` 在不传 `--canonical-matrix` 时仍能正确工作
-- `--validate-only` 在不传 `--canonical-matrix` 时仍能基于 manifest 正确返回退出码
-- `run_progress.json` 中最终：
-  - `bundle_progress = 1.0`
-- `paper_acceptance.json` 中：
-  - `bundle_complete = true`
-  - `primary_safety_valid = true`
-- canonical matrix 中每个 expected cell 都完整覆盖 `30` seeds
-- 主表、图、显著性结果都有唯一、稳定、可重建的产物目录
+- `run_progress.json` 最终 `bundle_progress = 1.0`
+- `paper_acceptance.json` 中 `bundle_complete = true`
+- `paper_acceptance.json` 中 `primary_safety_valid = true`
+- 所有 expected canonical cells 覆盖 `30` seeds
 
 ---
 
 ## 4. 技术栈红线
 
-### 4.1 架构红线
+以下要求必须继续严格保留，不得被后续工程师破坏：
 
-- 必须保持三层白盒闭环：
-  - `Mode Decision -> Nominal Controller -> Safety Filter`
-- 正文主线不能改写成端到端黑盒 RL
-- 当前 RL 只能是 `param-only supervisor`
+### 4.1 主架构红线
 
-### 4.2 安全层红线
+- 正文主线始终是白盒主链：
+  - `FSM + adaptive_apf + CBF-QP`
+- `paper_canonical` 只服务于 white-box 正文矩阵
+- RL 不得重新升级为当前主线
 
-严禁修改以下文件：
+### 4.2 RL 红线
 
-- `src/apflf/safety/safety_filter.py`
-- `src/apflf/safety/cbf.py`
-- `src/apflf/safety/qp_solver.py`
+- RL 仍严格限制为：
+  - `param-only supervisor`
+- 不允许回滚成：
+  - `mode-only RL`
+  - `full supervisor continuous control`
+- 不允许让 RL 直接输出连续控制量
+- 不允许引入 `SB3`
+- `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md` 里保留的旧 `mode-only RL` 理论模板不是当前活契约
 
-### 4.3 接口红线
+### 4.3 公共接口红线
 
-严禁破坏以下公共接口与数据结构：
+以下接口不得修改：
 
 - `ModeDecision(mode, theta, source, confidence)`
 - `compute_actions(observation, mode, theta=None)`
 
-### 4.4 RL 红线
+### 4.4 安全层红线
 
-- 不允许把 RL 扩成 `mode-only`
-- 不允许把 RL 扩成 `full supervisor`
-- 不允许 RL 直接输出 `mode`
-- 不允许 RL 直接输出 `accel`
-- 不允许 RL 直接输出 `steer`
-- 不允许引入 `SB3`
-- PPO 后端必须继续沿用仓库内自定义 Torch 实现
-- 需要特别澄清：
-  - `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md` 里旧的 “mode-only RL” 理论模板不是当前活契约
-  - 当前活契约仍然是 `param-only supervisor + custom Torch PPO`
+- 不允许修改 safety red-line 文件
+- 不允许为了追求效率而放松 CBF-QP 的 safety acceptance 口径
 
-### 4.5 工程红线
+### 4.5 统计与论文口径红线
 
-- 所有实验必须保持 deterministic seeds，或在非 deterministic runtime 下明确记录可复现的 checkpoint 与 seed 路径
-- 每次源码改动后至少执行：
-  - `python -m compileall src tests scripts`
-- 对论文主表链路的任何改动，必须同时补：
-  - 统计层测试
-  - 导出层测试
-  - reproduce / manifest / acceptance 层测试
+- 默认主表统计继续使用 deterministic bootstrap CI
+- `paper_acceptance.json` 必须继续作为正文 artifact 的唯一收口入口
+- paired delta 继续只允许按相同 seed 配对
 
 ---
 
-## 5. 一句话结论
+## 5. 一句话交接
 
-- RL 现在已经“能进 gate”，但 multi-seed 结果表明它仍不优于 white-box baseline。
-- canonical sealing、progress ledger、`status-only / validate-only` 这一轮已经写完；下一位工程师不要再去改 RL，而是立刻补 **manifest 驱动的 pure-disk audit bootstrap**，然后正式跑 `paper_canonical`，把白盒正文主线收口。
+当前最重要的事实是：
+
+- manifest-first canonical audit 已经完成
+- `paper_canonical` 正文长跑已经启动
+- RL 线当前不再是主任务
+- 下一位工程师不该再改算法，而应该立刻补 **canonical 长跑的运行态 heartbeat / running-cell journal**，然后继续把 `paper_canonical` 跑到 `bundle_complete = true`

@@ -89,6 +89,76 @@ def _summary_row(
     }
 
 
+def _expected_cell(
+    *,
+    exp_id: str,
+    scenario: str,
+    method: str,
+    variant_type: str = "method",
+    variant_name: str | None = None,
+) -> dict[str, object]:
+    resolved_variant_name = method if variant_name is None else variant_name
+    if variant_type == "ablation":
+        run_id = f"{scenario}__adaptive_apf__{resolved_variant_name}"
+        config_name = f"{scenario}__ablation__{resolved_variant_name}.yaml"
+    else:
+        run_id = f"{scenario}__{method}"
+        config_name = f"{scenario}__method__{method}.yaml"
+    return {
+        "scenario": scenario,
+        "method": method,
+        "variant_type": variant_type,
+        "variant_name": resolved_variant_name,
+        "run_id": run_id,
+        "config_path": str(Path("outputs") / exp_id / "generated_configs" / config_name),
+        "output_dir": str(Path("outputs") / exp_id / "runs" / run_id),
+    }
+
+
+def _write_manifest(
+    path: Path,
+    *,
+    exp_id: str,
+    expected_seeds: list[int],
+    expected_cells: list[dict[str, object]],
+    canonical_matrix: bool = False,
+) -> None:
+    expected_scenarios = sorted({str(cell["scenario"]) for cell in expected_cells})
+    expected_methods = sorted(
+        {
+            str(cell["method"])
+            for cell in expected_cells
+            if str(cell["variant_type"]) == "method"
+        }
+    )
+    expected_ablations = sorted(
+        {
+            str(cell["variant_name"])
+            for cell in expected_cells
+            if str(cell["variant_type"]) == "ablation"
+        }
+    )
+    payload = {
+        "exp_id": exp_id,
+        "canonical_matrix": canonical_matrix,
+        "primary_method": "no_rl",
+        "expected_seed_count": len(expected_seeds),
+        "expected_seeds": expected_seeds,
+        "expected_scenarios": expected_scenarios,
+        "expected_methods": expected_methods,
+        "expected_ablations": expected_ablations,
+        "expected_cells": expected_cells,
+        "observed_row_count": 0,
+        "observed_run_count": 0,
+        "observed_git_commits": [],
+        "matrix_index_path": "matrix_index.csv",
+        "paper_acceptance_path": "paper_acceptance.json",
+        "all_runs_path": "all_runs.csv",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def test_reproduce_paper_writes_manifest_index_and_acceptance(tmp_path: Path) -> None:
     module = _load_module("reproduce_paper_test", "scripts/reproduce_paper.py")
     repo_root = Path(__file__).resolve().parents[1]
@@ -305,6 +375,16 @@ def test_reproduce_paper_status_only_refreshes_bundle_from_disk() -> None:
     paper_dir = repo_root / "outputs" / exp_id
 
     try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
         _write_summary_csv(
             paper_dir / "runs" / "s1_local_minima__no_rl" / "summary.csv",
             [_summary_row(seed=0, config_hash="cfg_no_rl", leader_goal_error=8.0)],
@@ -330,15 +410,6 @@ def test_reproduce_paper_status_only_refreshes_bundle_from_disk() -> None:
             [
                 "--exp-id",
                 exp_id,
-                "--scenarios",
-                "s1_local_minima",
-                "--methods",
-                "no_rl",
-                "apf",
-                "--ablations",
-                "--seeds",
-                "0",
-                "1",
                 "--status-only",
             ]
         )
@@ -352,6 +423,7 @@ def test_reproduce_paper_status_only_refreshes_bundle_from_disk() -> None:
 
         assert run_progress["bundle_progress"] == 0.75
         assert run_progress["remaining_cell_count"] == 2
+        assert run_progress["num_expected_cells"] == 2
         assert acceptance["bundle_complete"] is False
         assert any(row["method"] == "no_rl" and row["status"] == "partial" for row in cell_progress)
         assert any(row["method"] == "apf" and row["status"] == "invalid" for row in cell_progress)
@@ -366,6 +438,16 @@ def test_reproduce_paper_validate_only_returns_nonzero_for_incomplete_bundle() -
     paper_dir = repo_root / "outputs" / exp_id
 
     try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
         _write_summary_csv(
             paper_dir / "runs" / "s1_local_minima__no_rl" / "summary.csv",
             [_summary_row(seed=0, config_hash="cfg_no_rl", leader_goal_error=8.0)],
@@ -391,15 +473,10 @@ def test_reproduce_paper_validate_only_returns_nonzero_for_incomplete_bundle() -
             [
                 "--exp-id",
                 exp_id,
-                "--scenarios",
-                "s1_local_minima",
-                "--methods",
-                "no_rl",
-                "apf",
-                "--ablations",
                 "--seeds",
                 "0",
                 "1",
+                "2",
                 "--validate-only",
             ]
         )
@@ -419,6 +496,16 @@ def test_reproduce_paper_validate_only_returns_zero_for_complete_bundle() -> Non
     paper_dir = repo_root / "outputs" / exp_id
 
     try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
         _write_summary_csv(
             paper_dir / "runs" / "s1_local_minima__no_rl" / "summary.csv",
             [
@@ -447,15 +534,10 @@ def test_reproduce_paper_validate_only_returns_zero_for_complete_bundle() -> Non
             [
                 "--exp-id",
                 exp_id,
-                "--scenarios",
-                "s1_local_minima",
-                "--methods",
-                "no_rl",
-                "apf",
-                "--ablations",
                 "--seeds",
                 "0",
                 "1",
+                "2",
                 "--validate-only",
             ]
         )
@@ -466,5 +548,99 @@ def test_reproduce_paper_validate_only_returns_zero_for_complete_bundle() -> Non
         assert run_progress["bundle_progress"] == 1.0
         assert acceptance["bundle_complete"] is True
         assert acceptance["primary_safety_valid"] is True
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_audit_requires_manifest_or_canonical_matrix() -> None:
+    module = _load_module("reproduce_paper_test_manifest_required", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        def fail_run(*args, **kwargs):
+            raise AssertionError("audit bootstrap failure should not launch experiment runs")
+
+        def fail_export(*args, **kwargs):
+            raise AssertionError("audit bootstrap failure should not export paper artifacts")
+
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        status_exit = module.main(["--exp-id", exp_id, "--status-only"])
+        validate_exit = module.main(["--exp-id", exp_id, "--validate-only"])
+
+        assert status_exit == 2
+        assert validate_exit == 2
+        assert not (paper_dir / "manifest.json").exists()
+        assert not (paper_dir / "run_progress.json").exists()
+        assert not (paper_dir / "paper_acceptance.json").exists()
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_status_only_is_idempotent_with_manifest() -> None:
+    module = _load_module("reproduce_paper_test_status_idempotent", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        _write_summary_csv(
+            paper_dir / "runs" / "s1_local_minima__no_rl" / "summary.csv",
+            [
+                _summary_row(seed=0, config_hash="cfg_no_rl", leader_goal_error=8.0),
+                _summary_row(seed=1, config_hash="cfg_no_rl", leader_goal_error=8.5),
+            ],
+        )
+        _write_summary_csv(
+            paper_dir / "runs" / "s1_local_minima__apf" / "summary.csv",
+            [
+                _summary_row(seed=0, config_hash="cfg_apf", leader_goal_error=10.0),
+                _summary_row(seed=1, config_hash="cfg_apf", leader_goal_error=10.5),
+            ],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("status-only idempotency should not launch experiment runs")
+
+        def fail_export(*args, **kwargs):
+            raise AssertionError("status-only idempotency should not export paper artifacts")
+
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        first_exit = module.main(["--exp-id", exp_id, "--status-only"])
+        first_snapshot = {
+            "manifest": (paper_dir / "manifest.json").read_text(encoding="utf-8"),
+            "run_progress": (paper_dir / "run_progress.json").read_text(encoding="utf-8"),
+            "cell_progress": (paper_dir / "cell_progress.csv").read_text(encoding="utf-8"),
+            "matrix_index": (paper_dir / "matrix_index.csv").read_text(encoding="utf-8"),
+            "acceptance": (paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"),
+        }
+
+        second_exit = module.main(["--exp-id", exp_id, "--status-only"])
+        second_snapshot = {
+            "manifest": (paper_dir / "manifest.json").read_text(encoding="utf-8"),
+            "run_progress": (paper_dir / "run_progress.json").read_text(encoding="utf-8"),
+            "cell_progress": (paper_dir / "cell_progress.csv").read_text(encoding="utf-8"),
+            "matrix_index": (paper_dir / "matrix_index.csv").read_text(encoding="utf-8"),
+            "acceptance": (paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"),
+        }
+
+        assert first_exit == 0
+        assert second_exit == 0
+        assert first_snapshot == second_snapshot
     finally:
         shutil.rmtree(paper_dir, ignore_errors=True)
