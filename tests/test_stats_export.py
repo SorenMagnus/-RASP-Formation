@@ -11,7 +11,9 @@ from apflf.analysis.stats import (
     aggregate_metric,
     aggregate_metric_with_ci,
     pairwise_compare_to_reference,
+    summarize_canonical_progress,
     summarize_experiments,
+    validate_canonical_bundle,
 )
 
 
@@ -253,3 +255,111 @@ def test_export_paper_artifacts_writes_tables_and_figures(tmp_path: Path) -> Non
     assert (tmp_path / "figures" / "failure_case_panel.pdf").exists()
     pretty_table = (tmp_path / "tables" / "main_results_pretty.csv").read_text(encoding="utf-8")
     assert "+/-" in pretty_table
+
+
+def test_validate_canonical_bundle_reports_missing_seeds_and_hash_mismatch() -> None:
+    rows = [
+        {
+            "scenario": "s1_local_minima",
+            "method": "no_rl",
+            "variant_type": "method",
+            "variant_name": "no_rl",
+            "run_id": "s1_local_minima__no_rl",
+            "config_path": "configs/generated/no_rl.yaml",
+            "output_dir": "outputs/paper/s1_local_minima__no_rl",
+            "seed": 0,
+            "config_hash": "cfg_a",
+            "leader_goal_error": 10.0,
+            "time_to_goal": 12.0,
+            "mean_speed": 4.0,
+            "leader_path_length_ratio": 1.02,
+            "min_ttc": 2.0,
+            "min_obstacle_clearance": 0.8,
+            "collision_count": 0,
+            "boundary_violation_count": 0,
+            "fallback_ratio": 0.1,
+            "terminal_formation_error": 0.4,
+        },
+        {
+            "scenario": "s1_local_minima",
+            "method": "apf",
+            "variant_type": "method",
+            "variant_name": "apf",
+            "run_id": "s1_local_minima__apf",
+            "config_path": "configs/generated/apf.yaml",
+            "output_dir": "outputs/paper/s1_local_minima__apf",
+            "seed": 0,
+            "config_hash": "cfg_b0",
+            "leader_goal_error": 12.0,
+            "time_to_goal": 14.0,
+            "mean_speed": 3.5,
+            "leader_path_length_ratio": 1.10,
+            "min_ttc": 1.2,
+            "min_obstacle_clearance": 0.5,
+            "collision_count": 0,
+            "boundary_violation_count": 0,
+            "fallback_ratio": 0.2,
+            "terminal_formation_error": 0.8,
+        },
+        {
+            "scenario": "s1_local_minima",
+            "method": "apf",
+            "variant_type": "method",
+            "variant_name": "apf",
+            "run_id": "s1_local_minima__apf",
+            "config_path": "configs/generated/apf.yaml",
+            "output_dir": "outputs/paper/s1_local_minima__apf",
+            "seed": 1,
+            "config_hash": "cfg_b1",
+            "leader_goal_error": 11.5,
+            "time_to_goal": 13.5,
+            "mean_speed": 3.6,
+            "leader_path_length_ratio": 1.08,
+            "min_ttc": 1.3,
+            "min_obstacle_clearance": 0.55,
+            "collision_count": 0,
+            "boundary_violation_count": 0,
+            "fallback_ratio": 0.25,
+            "terminal_formation_error": 0.75,
+        },
+    ]
+    expected_cells = [
+        {
+            "scenario": "s1_local_minima",
+            "method": "no_rl",
+            "variant_type": "method",
+            "variant_name": "no_rl",
+        },
+        {
+            "scenario": "s1_local_minima",
+            "method": "apf",
+            "variant_type": "method",
+            "variant_name": "apf",
+        },
+    ]
+
+    matrix_index_rows, acceptance = validate_canonical_bundle(
+        rows,
+        expected_cells=expected_cells,
+        expected_seeds=[0, 1],
+        primary_method="no_rl",
+    )
+
+    no_rl_row = next(row for row in matrix_index_rows if row["method"] == "no_rl")
+    apf_row = next(row for row in matrix_index_rows if row["method"] == "apf")
+    progress = summarize_canonical_progress(matrix_index_rows, acceptance)
+    assert no_rl_row["missing_seed_count"] == 1
+    assert no_rl_row["status"] == "partial"
+    assert no_rl_row["progress_ratio"] == 0.5
+    assert no_rl_row["cell_valid"] is False
+    assert apf_row["status"] == "invalid"
+    assert apf_row["progress_ratio"] == 1.0
+    assert apf_row["config_hash_consistent"] is False
+    assert acceptance["bundle_complete"] is False
+    assert acceptance["num_expected_cells"] == 2
+    assert acceptance["num_complete_cells"] == 1
+    assert {cell["method"] for cell in acceptance["missing_cells"]} == {"no_rl"}
+    assert {cell["method"] for cell in acceptance["invalid_cells"]} == {"no_rl", "apf"}
+    assert progress["bundle_progress"] == 0.75
+    assert progress["num_partial_cells"] == 1
+    assert progress["num_invalid_cells"] == 1
