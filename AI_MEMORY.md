@@ -1,435 +1,390 @@
-﻿# AI_MEMORY - 当前周期交接文档
+﻿# AI_MEMORY - 褰撳墠鍛ㄦ湡浜ゆ帴鏂囨。
 
-> 下一位 AI / 工程师启动后，先完整阅读本文件，再阅读 `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md`，然后再动代码。  
-> 本文件按 `2026-04-02` 的真实仓库状态重写；旧版 AI_MEMORY 中关于 dirty worktree、旧 `HEAD`、以及“下一步去补 `status-only / validate-only`”的描述都已经过期。
-
+> 涓嬩竴浣?AI / 宸ョ▼甯堝惎鍔ㄥ悗锛屽厛瀹屾暣闃呰鏈枃浠讹紝鍐嶉槄璇?`PROMPT_SYSTEM.md` 涓?`RESEARCH_GOAL.md`锛岀劧鍚庡啀鍔ㄤ唬鐮併€? 
+> 鏈枃浠舵寜 `2026-04-02` 鐨勭湡瀹炰粨搴撶姸鎬侀噸鍐欙紱鏃х増 AI_MEMORY 涓叧浜庢棫 `HEAD`銆佹棫 dirty/clean 鍙欒堪銆佷互鍙娾€滀笅涓€姝ュ彧鍘昏ˉ manifest-first audit鈥濈殑鎻忚堪閮藉凡缁忚繃鏈熴€?
 ---
 
-## 0. 当前开发游标
-
-- 日期：
-  - `2026-04-02`
-- Git 游标：
-  - `HEAD = de0cf46ce6a2f11ee1a14132a88c82b2601e662a`
-- 当前工作树：
-  - 在本次重写 `AI_MEMORY.md` 之前，repo-tracked 改动只有 `2` 个文件：
+## 0. 褰撳墠寮€鍙戞父鏍?
+- 鏃ユ湡锛?  - `2026-04-02`
+- Git 娓告爣锛?  - `HEAD = 54bb295fb6548c0167975510558ce2fff18251fc`
+- 褰撳墠宸ヤ綔鏍戯細
+  - 鍦ㄦ湰娆￠噸鍐欏墠锛宺epo-tracked 鏀瑰姩鍏?`3` 涓枃浠讹細
+    - `AI_MEMORY.md`
     - `scripts/reproduce_paper.py`
     - `tests/test_reproduce_paper.py`
-  - 本文件重写后，`AI_MEMORY.md` 也会进入 modified 状态
-- 当前后台进程：
-  - 当前没有活动中的 `reproduce_paper.py`
-  - 今天曾启动过一条正文 canonical 长跑，但已被人工停止：
-    - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
-  - 当前保留的运行日志：
-    - `outputs/paper_canonical_run_stdout.log`
-    - `outputs/paper_canonical_run_stderr.log`
-  - `stdout` 目前仍为空
-  - `stderr` 最后更新时间停在 `2026-04-02 00:25:21`
-  - 截至停止前，只看到 CBF-QP / fallback 警告，没有看到致命 traceback
-- 当前正文 artifact 游标：
-  - `outputs/paper_canonical` 已经创建
-  - 当前已存在这些 bundle 产物：
-    - `outputs/paper_canonical/manifest.json`
-    - `outputs/paper_canonical/run_progress.json`
-    - `outputs/paper_canonical/cell_progress.csv`
-    - `outputs/paper_canonical/matrix_index.csv`
-    - `outputs/paper_canonical/paper_acceptance.json`
-  - 但截至本文件重写时，canonical 进度仍是：
-    - `bundle_progress = 0.0`
-    - `num_expected_cells = 55`
-    - `num_complete_cells = 0`
-    - `remaining_cell_count = 55`
-  - 当前只看到第一个 cell 已进入运行前状态：
-    - `outputs/paper_canonical/generated_configs/s1_local_minima__method__no_rl.yaml`
-    - `outputs/paper_canonical/runs/s1_local_minima__no_rl/`
-  - 该 cell 当前尚未落盘 `summary.csv`
-  - 当前 partial bundle 必须保留，后续应在其基础上恢复，而不是删目录重来
-- 当前正文主线：
-  - 正文主方法仍然是白盒主链：`FSM + adaptive_apf + CBF-QP`
-  - `paper_canonical` 只应包含 white-box 正文矩阵
-- 当前 RL 游标：
-  - RL 仍然只保留为附录增强候选，不是正文主方法
-  - 当前官方 RL 结论仍来自：
-    - `outputs/s5_rl_gate_warmstart_smoke__no_rl/summary.csv`
-    - `outputs/s5_rl_gate_warmstart_smoke__rl_param_only/summary.csv`
-    - `outputs/s5_rl_gate_warmstart_smoke__rl_param_only/analysis/rl_attribution/aggregate.json`
-  - 当前 RL 关键结论继续保持：
-    - `dominant_bottleneck = safety_engagement`
-    - `rl_fallback_ratio_mean = 0.043939393939393945`
-    - `gate_open_ratio_mean = 0.956060606060606`
-    - `theta_change_ratio_mean = 0.956060606060606`
-    - `leader_final_x_delta_mean = -0.061367621493906434`
-    - `collision_count` 总和 = `0`
-    - `boundary_violation_count` 总和 = `0`
+  - 鏈閲嶅啓瀹屾垚鍚庯紝`AI_MEMORY.md` 浠嶄細淇濇寔 modified
+- 褰撳墠婧愮爜鏀瑰姩涓昏酱锛?  - 鏈疆鏂板鏀瑰姩宸蹭粠鈥渕anifest-first audit鈥濇帹杩涘埌鈥渃anonical runtime heartbeat / running-cell journal鈥?  - 涔熷氨鏄锛屽綋鍓?`reproduce_paper.py` 宸茬粡涓嶅彧鏄兘锛?    - 鐢熸垚 `manifest.json`
+    - 鐢熸垚 `run_progress.json`
+    - 鐢熸垚 `cell_progress.csv`
+    - 鎵ц `--status-only / --validate-only`
+  - 鐜板湪杩橀澶栬兘锛?    - 鐢熸垚 `run_runtime_state.json`
+    - 鐢熸垚 `cell_runtime_state.csv`
+    - 杩借釜 active cell 鐨?`runtime_status / started_at / last_heartbeat / heartbeat_age_seconds / stalled`
 
-### 当前最重要的结论
+### 褰撳墠 live canonical snapshot
 
-- RL 这条线的工程诊断已经足够清楚：
-  - warm-start 与 effective-threshold 持久化已经解决了“完全进不了 gate”的结构问题
-  - 但 multi-seed 效率仍劣于 `no_rl`
-  - 因此 RL 当前不应继续绑架正文主线
-- 当前真正还没收口的，不是算法，而是 **white-box canonical artifact 闭环**
-- `manifest / matrix_index / paper_acceptance / run_progress / cell_progress / status-only / validate-only` 这些代码链路已经具备
-- 但正文 canonical 真实长跑才刚启动，仍未产生任何完整 cell 的 `summary.csv`
-- 也就是说，当前最紧迫的剩余问题已经从“功能缺失”变成了“长时间 canonical 运行的运行态可观测性不足”
+- 褰撳墠姝ｆ枃涓荤嚎浠嶇劧鏄細
+  - `FSM + adaptive_apf + CBF-QP`
+- `paper_canonical` 浠嶅彧鏈嶅姟浜?white-box 姝ｆ枃鐭╅樀
+- 褰撳墠 `outputs/paper_canonical` 蹇呴』淇濈暀锛屼笉鑳藉垹鐩綍閲嶆潵
+- 褰撳墠 canonical bundle 宸插垵濮嬪寲锛岃嚦灏戝凡瀛樺湪锛?  - `outputs/paper_canonical/manifest.json`
+  - `outputs/paper_canonical/run_progress.json`
+  - `outputs/paper_canonical/cell_progress.csv`
+  - `outputs/paper_canonical/matrix_index.csv`
+  - `outputs/paper_canonical/paper_acceptance.json`
+  - `outputs/paper_canonical/run_runtime_state.json`
+  - `outputs/paper_canonical/cell_runtime_state.csv`
+- 鎴嚦鏈枃浠堕噸鍐欐椂鐨勭鐩樼湡鍊硷細
+  - `bundle_progress = 0.0`
+  - `bundle_completed_progress = 0.0`
+  - `num_expected_cells = 55`
+  - `num_complete_cells = 0`
+  - `num_running_cells = 1`
+  - `num_pending_cells = 54`
+  - 褰撳墠浠嶇劧 **娌℃湁浠讳綍** `summary.csv` 钀界洏
+- 褰撳墠 `run_runtime_state.json` 鐨?live snapshot 鏄剧ず锛?  - `running_cell_count = 1`
+  - active cell 涓猴細
+    - `scenario = s1_local_minima`
+    - `variant_type = method`
+    - `variant_name = no_rl`
+    - `method = no_rl`
+    - `run_id = s1_local_minima__no_rl`
+  - active cell 褰撳墠涓猴細
+    - `runtime_status = running`
+    - `completed_seed_count = 0`
+    - `completed_progress = 0.0`
+    - `stalled = false`
+- 褰撳墠杩涚▼鐪熷€硷細
+  - 褰撳墠妫€娴嬪埌涓や釜 `python` 杩涚▼锛?    - `PID 5196`锛屽惎鍔ㄤ簬 `2026-04-02 13:03:12`锛孋PU 绱Н鏄捐憲锛屾洿鍍忓綋鍓?active `paper_canonical`
+    - `PID 9412`锛屽惎鍔ㄦ洿鏃╋紝涓嶅簲榛樿瑙嗕负鏈疆 canonical 涓昏繘绋?  - 鍥犳锛屽綋鍓嶄笉鑳藉啀璇粹€滄病鏈夋椿鍔ㄤ腑鐨?reproduce_paper.py鈥?- 褰撳墠鏃ュ織鐘舵€侊細
+  - `outputs/paper_canonical_run_stdout.log` 鐩墠浠嶄负绌?  - `outputs/paper_canonical_run_stderr.log` 褰撳墠浠嶅湪鍒凤細
+    - `solver_status=maximum iterations reached`
+    - `preview_violation_after_qp`
+  - 鎴嚦杩欐閲嶅啓锛屾湭鐪嬪埌鑷村懡 traceback
+
+### 褰撳墠鏈€閲嶈鐨勭粨璁?
+- RL 杩欐潯绾跨殑宸ョ▼璇婃柇宸茬粡瓒冲锛?  - warm-start 涓?effective-threshold 鎸佷箙鍖栧凡缁忚瘉鏄?RL 鑳界湡瀹炰粙鍏?nominal layer
+  - 浣?multi-seed 鏁堢巼浠嶄笉浼樹簬 `no_rl`
+  - 鍥犳 RL 缁х画鐣欏湪闄勫綍澧炲己鍊欓€夛紝涓嶅啀缁戞灦姝ｆ枃涓荤嚎
+- 褰撳墠鐪熸杩樻病鏀跺彛鐨勶紝涓嶆槸绠楁硶锛屼篃涓嶆槸 canonical sealing锛岃€屾槸锛?  - **white-box canonical 闀胯窇鐨勬渶缁?artifact 杩樻病鏈夌湡姝ｈ惤鐩?*
+- 褰撳墠鏈€鍏抽敭鐨勬柊澧炶兘鍔涘凡缁忎笉鏄€滆兘涓嶈兘楠屾敹鈥濓紝鑰屾槸鈥滃湪绗竴涓?`summary.csv` 钀界洏涔嬪墠锛岃兘鍚︾湅娓?run 鏄湪娲荤潃銆佸崱浣忋€佽繕鏄凡缁忓け鑱斺€?- 杩欒疆 heartbeat / runtime journal 浠ｇ爜宸茬粡鎶娾€滃彲瑙傛祴鎬х己鍙ｂ€濊ˉ涓婁簡
+- 浣嗗綋鍓?bundle 浠嶇劧鍙槸锛?  - 宸插垵濮嬪寲
+  - 姝ｅ湪璺戠涓€涓?cell
+  - 灏氭棤浠讳綍瀹屾暣 cell 瀹屾垚
 
 ---
 
-## 1. 已完成工作
+## 1. 宸插畬鎴愬伐浣?
+### 1.1 鍘嗗彶涓荤嚎鑳藉姏浠嶇劧鎴愮珛
 
-### 1.1 历史主线能力仍然成立
-
-- gatefix 已完成：
-  - `confidence_raw` 使用 Beta 方差校准
-  - 两阈值滞回 gate 已在位
-- reward_v2 已完成：
+- gatefix 宸插畬鎴愶細
+  - `confidence_raw` 浣跨敤 Beta 鏂瑰樊鏍″噯
+  - 涓ら槇鍊兼粸鍥?gate 宸插湪浣?- reward_v2 宸插畬鎴愶細
   - reward shaping
-  - reward 配置化
-  - PPO reward diagnostics
-- training warm-start 已完成：
+  - reward 閰嶇疆鍖?  - PPO reward diagnostics
+- training warm-start 宸插畬鎴愶細
   - `tau_enter_start = 0.25`
   - `tau_exit_start = 0.15`
   - `gate_warmup_timesteps = 20000`
-- effective runtime threshold 已完成并已贯通到：
-  - runtime diagnostics
+- effective runtime threshold 宸插畬鎴愬苟宸茶疮閫氬埌锛?  - runtime diagnostics
   - replay
   - RL attribution
-- RL 路线当前已经完成“它能否真实介入 nominal layer”的工程诊断任务：
-  - 可以进 gate
-  - 但 multi-seed 结果仍不优于 white-box baseline
+- RL 璺嚎宸茬粡瀹屾垚鈥滃畠鑳藉惁鐪熷疄浠嬪叆 nominal layer鈥濈殑宸ョ▼璇婃柇浠诲姟锛?  - 鑳借繘 gate
+  - 浣?multi-seed 缁撴灉浠嶄笉浼樹簬 white-box baseline
 
-### 1.2 本轮源码实现：manifest-first canonical audit 已完成
+### 1.2 manifest-first canonical audit 宸插畬鎴?
+- `scripts/reproduce_paper.py`
+  - 宸叉敮鎸侊細
+    - `--status-only`
+    - `--validate-only`
+  - 浜岃€呭綋鍓嶉兘宸茬粡鏄?manifest-first锛?    1. 鑻?`outputs/<exp_id>/manifest.json` 瀛樺湪锛屽垯浼樺厛浠?manifest 鎭㈠ canonical spec
+    2. manifest 涓嶅瓨鍦ㄤ笖鏄惧紡浼犱簡 `--canonical-matrix` 鏃讹紝鎵嶅厑璁?fallback 鍒?canonical 甯搁噺
+    3. manifest 涓嶅瓨鍦ㄤ笖鏈樉寮忎紶 `--canonical-matrix` 鏃讹紝杩斿洖闈為浂閫€鍑虹爜 `2`
+- 绾鐩樺璁″綋鍓嶅凡鍏峰锛?  - `manifest.json`
+  - `run_progress.json`
+  - `cell_progress.csv`
+  - `matrix_index.csv`
+  - `paper_acceptance.json`
+- 杩欎簺浜х墿鐜板湪閮藉彲鍦?partial bundle 涓婂埛鏂帮紝涓嶅啀渚濊禆 CLI 榛樿 `seeds/scenarios/methods/ablations`
+
+### 1.3 鏈疆鏂板婧愮爜瀹炵幇锛歝anonical runtime heartbeat / running-cell journal
 
 - `scripts/reproduce_paper.py`
-  - 已新增并落地 manifest-first audit helper：
-    - `_load_manifest(...)`
-    - `_manifest_list_of_str(...)`
-    - `_manifest_list_of_int(...)`
-    - `_manifest_expected_cells(...)`
-    - `_resolve_audit_spec(...)`
-  - `--status-only` / `--validate-only` 当前已改为：
-    1. 若 `outputs/<exp_id>/manifest.json` 存在，则必须优先从 manifest 恢复 canonical spec
-    2. 若 manifest 不存在但显式传了 `--canonical-matrix`，才允许退回 canonical 常量
-    3. 若 manifest 不存在且也没传 `--canonical-matrix`，则明确失败
-  - 缺 manifest 时，`main()` 当前会：
-    - 向 `stderr` 打印：
-      - `Manifest-driven audit requires an existing manifest.json or explicit --canonical-matrix.`
-    - 返回语义码 `2`
-  - `--status-only` / `--validate-only` 继续保持纯磁盘语义：
-    - 不触发 simulation
-    - 不触发 benchmark
-    - 不触发 export 子运行
-    - 只读取 `outputs/<exp_id>/...` 的现有 bundle 状态
+  - 宸叉柊澧炶繍琛屾€佸父閲忎笌杩愯鎬佹枃浠跺啓鍏ラ€昏緫
+  - 宸叉柊澧炲苟钀藉湴涓ょ被杩愯鎬佷骇鐗╋細
+    - `run_runtime_state.json`
+    - `cell_runtime_state.csv`
+  - 宸插疄鐜颁互涓嬭繍琛屾€佸瓧娈碉細
+    - `runtime_status 鈭?{pending, running, complete, failed}`
+    - `started_at`
+    - `last_heartbeat`
+    - `finished_at`
+    - `heartbeat_age_seconds`
+    - `stalled`
+    - `completed_seed_count`
+    - `completed_progress`
+  - 宸插疄鐜?heartbeat 绾跨▼锛?    - 蹇冭烦鍛ㄦ湡 `30` 绉?    - 浠呭埛鏂?runtime journal
+    - 涓嶄慨鏀?acceptance 鍙ｅ緞
+  - 宸插疄鐜颁覆琛岃繍琛岀害鏉燂細
+    - 浠绘剰鏃跺埢鍙厑璁?`running_cell_count 鈭?{0,1}`
+    - 鑻ョ鐩樹笂鍑虹幇澶氫釜 `running` rows锛屽垯鍙繚鐣欐渶鏂?heartbeat 鐨勯偅涓负 `running`
+  - 宸插疄鐜?`status-only` 鐨勮繍琛屾€佹憳瑕佽緭鍑猴細
+    - `bundle_completed_progress`
+    - `running_cell_count`
+    - `num_pending_cells`
+    - `num_running_cells`
+    - `num_complete_cells`
+    - `num_failed_cells`
+    - active cell 鐨?`scenario / variant_type / variant_name / method / run_id / heartbeat_age_seconds / stalled`
+  - 宸蹭繚鎸?`validate-only` 鐨?acceptance 涓嶅彉鎬э細
+    - 浠嶇劧鍙敱 `summary.csv` 鍜?bundle sealing 鍐冲畾 `bundle_complete`
+    - runtime `running` 缁濅笉浼氳褰撴垚 `complete`
+
 - `tests/test_reproduce_paper.py`
-  - 本轮已补齐 manifest-first 覆盖：
-    - manifest 存在时，audit 必须按 manifest.expected_seeds / expected_cells 计算
-    - manifest 缺失且未传 `--canonical-matrix` 时，audit 必须失败
-    - `--status-only` 重复执行必须幂等
-    - `--validate-only` 在 incomplete / invalid bundle 下非零，在 complete + primary-safe 下为零
+  - 鏈疆鏂板骞惰鐩栦簡 heartbeat / runtime journal 鐩稿叧閾捐矾锛?    - 杩愯鎬佹枃浠剁敓鎴愭祴璇?    - 鍗?running cell 绾︽潫娴嬭瘯
+    - `stalled` 鍒ゅ畾娴嬭瘯
+    - `status-only` 绾鐩樿繍琛屾€佽緭鍑烘祴璇?    - acceptance 涓嶅彉鎬ф祴璇?    - `status-only` 骞傜瓑鎬ф祴璇曪紝鐜板凡鎶婏細
+      - `run_runtime_state.json`
+      - `cell_runtime_state.csv`
+      绾冲叆蹇収姣斿
 
-### 1.3 本轮真实命令线验证已完成
+### 1.4 鏈疆宸插畬鎴愮殑楠岃瘉
 
-- 已重新验证：
-  - `python -m compileall src tests scripts` 通过
-  - `python -m pytest -q tests/test_stats_export.py tests/test_reproduce_paper.py` 通过
-    - 当前结果：`16 passed`
-  - `python -m pytest -q tests/test_offline_reporting.py` 通过
-    - 当前结果：`2 passed`
-- 当前可信的定向验证基线：
-  - 与本轮改动直接相关的测试链路合计 `18 passed`
-- 还需诚实记录：
-  - 本轮没有 fresh rerun 完整 `python -m pytest -q`
-  - 因此不要宣称“本轮 full-suite fresh rerun 全绿”
-
-### 1.4 本轮真实运行状态：`paper_canonical` 已启动并被人工停止
-
-- 已正式启动正文 canonical 长跑：
-  - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
-- 启动后，以下真实状态已被确认：
-  - `outputs/paper_canonical` 已存在
-  - `manifest.json` 已生成
-  - `run_progress.json` 已生成
-  - `cell_progress.csv` 已生成
-  - `matrix_index.csv` 已生成
-  - `paper_acceptance.json` 已生成
-- 已确认新的 manifest-first audit 在真实磁盘 bundle 上可工作：
+- 宸?fresh 閫氳繃锛?  - `python -m compileall src tests scripts`
+  - `python -m pytest -q tests/test_stats_export.py tests/test_reproduce_paper.py`
+- 褰撳墠鏈疆鏈€鍙俊鐨?fresh 楠岃瘉缁撴灉锛?  - `20 passed`
+- 鏈疆娌℃湁 fresh rerun 瀹屾暣锛?  - `python -m pytest -q`
+- 鍥犳褰撳墠涓嶈兘瀹ｇО锛?  - 鈥滄湰杞?full-suite fresh rerun 鍏ㄧ豢鈥?
+### 1.5 鏈疆鐪熷疄杩愯楠岃瘉宸插畬鎴?
+- 杩欒疆 heartbeat 浠ｇ爜涓嶅彧鍋滅暀鍦ㄥ崟鍏冩祴璇曪紝宸茬粡瀵圭湡瀹?partial bundle 鍋氳繃鍛戒护绾块獙璇侊細
   - `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
-    - 在 **不传** `--canonical-matrix` 的情况下，仍能从磁盘 manifest 恢复 `55` 个 expected cells
   - `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
-    - 在当前 bundle 尚未完成的情况下，按预期给出“不通过”的逻辑结果
-- 截至本文件重写时，canonical 的实际运行状态是：
-  - 第一个 cell `s1_local_minima__no_rl` 已创建 output 目录
-  - 但还没有任何一个 `summary.csv` 真正落盘
-  - 因此 `bundle_progress` 仍为 `0.0`
-  - 这条长跑现已被人工停止，不再活动
-  - 当前磁盘状态应视为“可恢复的 partial canonical bundle”，不是“正在运行中的 active bundle”
+- 鐪熷疄缁撴灉鏄細
+  - `status-only` 鐜板湪鑳藉湪 partial bundle 涓婃墦鍗?live runtime 鎽樿
+  - `validate-only` 鍦ㄥ綋鍓?bundle 鏈畬鎴愭椂锛屼粛鎸夐鏈熻繑鍥炩€滀笉閫氳繃鈥?  - 杩欒瘉鏄庯細
+    - heartbeat 浠ｇ爜宸叉帴鍏ョ湡瀹?canonical 闀胯窇
+    - acceptance 瑙勫垯娌℃湁琚?runtime journal 姹℃煋
 
 ---
 
-## 2. 当前研究判断
+## 2. 褰撳墠鐮旂┒鍒ゆ柇
 
-- 当前项目不是“还差算法模块”，而是“还差正文 canonical 真正跑完并通过 acceptance”
-- 本轮之前的主要代码缺口是：
-  - `status-only / validate-only` 还没有做到 manifest-first
-- 这个缺口现在已经补完
-- 因此当前剩余问题不再是：
-  - RL reward
-  - RL gate
-  - warm-start 公式
-  - canonical sealing 本身
-- 当前真正的剩余工程风险，已经变成：
-  - **长时间 canonical 运行时，纯磁盘 ledger 在第一个 `summary.csv` 落盘之前无法区分“正在运行”与“已经卡住”**
+- 褰撳墠椤圭洰鍓╀笅鐨勪富闂锛屽凡缁忎笉鏄€滆繕缂哄摢娈垫牳蹇冪畻娉曚唬鐮佲€?- 褰撳墠鐪熸鏈敹鍙ｇ殑鏄細
+  - **white-box canonical artifact 杩樻病鏈夎窇瀹?*
+- 鏇村叿浣撳湴璇达細
+  - canonical audit 宸插畬鎴?  - runtime heartbeat 涔熷凡瀹屾垚
+  - 浣嗗綋鍓?bundle 浠嶅仠鍦ㄧ涓€涓?cell
+  - 灏氭棤浠讳綍 `summary.csv`
+  - 鍥犳 `paper_acceptance.json` 浠嶇劧鍙兘缁欏嚭鈥滄湭瀹屾垚鈥?
+褰撳墠鍒ゆ柇瑕佺偣濡備笅锛?
+- RL锛?  - 褰撳墠涓嶅啀鏄富浠诲姟
+  - 杩戞湡涓嶈缁х画娑堣€楀伐绋嬫椂闂村湪 RL 涓?- canonical 浠ｇ爜锛?  - 鈥滆兘鍚︾湅瑙?run 鍦ㄨ窇浠€涔堚€濊繖浠朵簨锛屽凡缁忛€氳繃 runtime journal 瑙ｅ喅
+  - 褰撳墠娌℃湁蹇呰鍐嶉噸鍐?manifest-first audit
+  - 褰撳墠涔熶笉闇€瑕佸啀鍥炲幓纰?reward / gate / warm-start
+- 鍓╀綑涓昏椋庨櫓宸茶浆鍖栦负锛?  - 闀挎椂闂?canonical 杩愯鐨勫悶鍚?/ stall / 涓€斿け鑱旇瘖鏂?  - 浠ュ強 canonical 鏈€缁堟槸鍚﹁兘涓€娆℃€ф弧瓒筹細
+    - `bundle_complete = true`
+    - `primary_safety_valid = true`
 
-更直白地说：
-
-- 现在 `paper_canonical` 已经开跑
-- 但 `run_progress.json` 目前只能告诉我们：
-  - `bundle_progress = 0.0`
-  - 所有 cell 仍是 missing / incomplete
-- 它还不能显式告诉我们：
-  - 当前是否有一个 cell 正在运行
-  - 当前正在跑哪一个 cell
-  - 当前这一个 cell 已经跑了多久
-  - 当前是否已经“长时间无 heartbeat”
-
-也就是说，当前下一段真正值得写的代码，不是再去碰算法，而是给 canonical 长跑补 **运行态 heartbeat / running-cell journal**。
-
+鎹㈠彞璇濊锛?
+- 鐜板湪宸茬粡闈炲父鎺ヨ繎鈥滀唬鐮佹敹鍙ｂ€?- 浣嗚窛绂烩€滃彲浠ユ斁蹇冭姝ｆ枃 artifact 宸插畬鎴愨€濊繕宸細
+  - canonical 鐪熸璺戝畬
+  - `paper_acceptance.json` 杩囨渶缁堥獙鏀?
 ---
 
-## 3. 下一步指令
+## 3. 涓嬩竴姝ユ寚浠?
+### 3.1 鎬诲師鍒?
+涓嬩竴浣嶅伐绋嬪笀鍚姩 AI 鍚庯細
 
-### 3.1 总原则
+- 涓嶈鍐嶆敼 RL reward
+- 涓嶈鍐嶆敼 RL gate
+- 涓嶈鍐嶆敼 warm-start 鍏紡
+- 涓嶈鍐嶉噸鍐?manifest-first audit
+- 涓嶈鍒?`outputs/paper_canonical`
+- 涓嶈鎶婂綋鍓?partial bundle 褰撴垚鍨冨溇鐩綍娓呯悊鎺?- 涓嶈鎶?runtime journal 褰撴垚 acceptance 鏇夸唬鍝?
+涓嬩竴鏉＄珛鍗虫墽琛岀殑浠ｇ爜浠诲姟锛屽簲鍥寸粫锛?
+- **canonical runtime process-aware liveness probe / orphan reconciliation**
 
-下一位工程师启动 AI 后：
+灞曞紑锛屼篃灏辨槸鍦?heartbeat 涔嬩笂锛屽啀琛モ€滆繘绋嬬骇娲绘€х‘璁も€濓紝璁╃郴缁熻兘鍖哄垎锛?
+- heartbeat 姝ｅ父銆佽繘绋嬩篃娲荤潃
+- heartbeat 杩囦箙鏈洿鏂帮紝浣嗚繘绋嬭繕娲荤潃
+- heartbeat 杩囦箙鏈洿鏂帮紝涓斿啓 heartbeat 鐨勮繘绋嬪凡缁忎笉瀛樺湪
 
-- 不要再改 RL reward
-- 不要再改 RL gate
-- 不要再改 warm-start 公式
-- 不要再把 RL 当成当前主任务
-- 不要重复重写 manifest-first audit
-- 不要删除现有 `outputs/paper_canonical`
-- 不要假设 `paper_canonical` 仍在后台运行
-
-下一条立即执行的代码任务，应围绕 **white-box canonical 长跑的运行态 heartbeat / running-cell journal** 展开。
-
-### 3.2 立即执行的代码任务
-
-在以下文件中实现 **canonical runtime heartbeat / running-cell journal**：
-
+### 3.2 绔嬪嵆鎵ц鐨勪唬鐮佷换鍔?
+鍦ㄤ互涓嬫枃浠朵腑缁х画瀹炵幇锛?
 - `scripts/reproduce_paper.py`
 - `tests/test_reproduce_paper.py`
 
-如确有必要，再最小增量触碰：
+濡傜‘鏈夊繀瑕侊紝鍐嶆渶灏忓閲忚Е纰帮細
 
 - `src/apflf/analysis/stats.py`
 - `tests/test_stats_export.py`
 
-优先复用当前已有能力：
+浼樺厛澶嶇敤褰撳墠宸叉湁鑳藉姏锛?
+- 褰撳墠 heartbeat thread
+- 褰撳墠 `run_runtime_state.json`
+- 褰撳墠 `cell_runtime_state.csv`
+- 褰撳墠 `status-only / validate-only`
+- 褰撳墠 `manifest.json`
+- 褰撳墠 `run_progress.json`
+- 褰撳墠 `cell_progress.csv`
 
-- `_write_sealed_artifacts(...)`
-- `_collect_disk_rows(...)`
-- `validate_canonical_bundle(...)`
-- `summarize_canonical_progress(...)`
-- 当前已有的 `manifest.json`
-- 当前已有的 `run_progress.json`
-- 当前已有的 `cell_progress.csv`
+涓嶈鍙﹁捣涓€濂楀钩琛?watchdog 鑴氭湰銆?
+### 3.3 杩欐浠ｇ爜蹇呴』鏂板浠€涔?
+鍦ㄨ繍琛屾€佷骇鐗╀腑缁х画鏂板骞剁淮鎶や互涓嬪瓧娈碉細
 
-不要另起一套平行 canonical validator。
+- `runner_pid`
+- `runner_started_at`
+- `process_alive`
+- `orphaned`
 
-### 3.3 这段代码必须产出什么
-
-为 `outputs/<exp_id>/` 新增并维护下面两类运行态产物：
-
+寤鸿鑷冲皯钀藉湪锛?
 - `run_runtime_state.json`
 - `cell_runtime_state.csv`
 
-这两类产物的职责是：
-
-- 在 **第一个 `summary.csv` 落盘之前**，也能让操作者知道 canonical 长跑是不是还活着
-- 显式记录：
-  - 当前是否有 cell 正在运行
-  - 当前正在运行哪个 cell
-  - 该 cell 的开始时间
-  - 最近一次 heartbeat 时间
-  - 当前 cell 的运行状态
-
-### 3.4 必须满足的状态机与数学约束
-
-记：
+鍏朵腑锛?
+- `runner_pid`锛?  - 褰撳墠璐熻矗璺戣 cell 鐨?Python 杩涚▼ PID
+- `runner_started_at`锛?  - 璇ヨ繘绋嬬殑鍚姩鏃堕棿鎴?- `process_alive`锛?  - 褰撳墠 audit 鏃讹紝纾佺洏璁板綍鐨?`runner_pid` 鏄惁浠嶅搴斿悓涓€涓椿杩涚▼
+- `orphaned`锛?  - 璇?cell 浠嶆樉绀?`runtime_status=running`锛屼絾璁板綍涓殑杩涚▼宸蹭笉鍐嶅瓨娲?
+### 3.4 蹇呴』婊¤冻鐨勭姸鎬佹満涓庢暟瀛︾害鏉?
+璁帮細
 
 - `S = manifest.expected_seeds`
 - `C = manifest.expected_cells`
 - `|S| = 30`
 - `|C| = 55`
+- `H = 900` 绉?- 杩涚▼鍚姩鏃堕棿鍖归厤瀹瑰樊锛?  - `螖 = 5` 绉?
+瀵逛换鎰忔椂鍒?`t`銆佷换鎰?cell `c 鈭?C`锛屽畾涔夛細
 
-对任意时刻 `t`、任意 cell `c ∈ C`，定义：
+- `completed_seed_count_t(c)`锛?  - 浠庣鐩?`summary.csv` 涓鍑虹殑宸插畬鎴?seed 鏁?- `completed_progress_t(c) = completed_seed_count_t(c) / |S|`
+- `bundle_completed_progress_t = (1 / (|C| * |S|)) * 危_c completed_seed_count_t(c)`
+- `heartbeat_age_t(c) = max(0, now_t - last_heartbeat_t(c))`
+- `process_alive_t(c) = 1[瀛樺湪杩涚▼ p锛屼娇寰?pid(p)=runner_pid(c) 涓?|start_time_utc(p)-runner_started_at(c)| <= 螖]`
+- `stalled_t(c) = 1[runtime_status_t(c)=running and heartbeat_age_t(c) > H]`
+- `orphaned_t(c) = 1[runtime_status_t(c)=running and process_alive_t(c)=0]`
 
-- `completed_seed_count_t(c)`：
-  - 从磁盘上已经落盘的 `summary.csv` 中读出的已完成 seed 数
-- `completed_progress_t(c) = completed_seed_count_t(c) / |S|`
-- `bundle_completed_progress_t = (1 / (|C| * |S|)) * Σ_c completed_seed_count_t(c)`
-
-必须满足：
-
+蹇呴』婊¤冻锛?
 - `0 <= completed_seed_count_t(c) <= |S|`
 - `0 <= completed_progress_t(c) <= 1`
 - `0 <= bundle_completed_progress_t <= 1`
-- 在不删除已有结果的前提下：
-  - `completed_seed_count_t(c)` 对 `t` 单调不减
-  - `completed_progress_t(c)` 对 `t` 单调不减
-  - `bundle_completed_progress_t` 对 `t` 单调不减
+- 鍦ㄤ笉鍒犻櫎宸叉湁缁撴灉鐨勫墠鎻愪笅锛?  - `completed_seed_count_t(c)` 瀵?`t` 鍗曡皟涓嶅噺
+  - `completed_progress_t(c)` 瀵?`t` 鍗曡皟涓嶅噺
+  - `bundle_completed_progress_t` 瀵?`t` 鍗曡皟涓嶅噺
+- `running_cell_count_t 鈭?{0, 1}`
+- `process_alive_t(c) 鈭?{0,1}`
+- `stalled_t(c) 鈭?{0,1}`
+- `orphaned_t(c) 鈭?{0,1}`
 
-新增运行态状态机：
-
-- `runtime_status_t(c) ∈ {pending, running, complete, failed}`
-
-并约束：
-
-- `running_cell_count_t = |{ c ∈ C : runtime_status_t(c) = running }|`
-- 由于 `reproduce_paper.py` 当前按 cell 串行执行，必须始终满足：
-  - `running_cell_count_t ∈ {0, 1}`
-
-新增 heartbeat 相关量：
-
-- `started_at_t(c)`：cell 开始运行时间
-- `last_heartbeat_t(c)`：最近一次 heartbeat 时间
-- `finished_at_t(c)`：cell 完成或失败时间
-- `heartbeat_age_t(c) = max(0, now_t - last_heartbeat_t(c))`
-
-默认 stall 阈值固定为：
-
-- `H = 900` 秒
-
-定义：
-
-- `stalled_t(c) = 1[runtime_status_t(c) = running and heartbeat_age_t(c) > H]`
-
-必须满足：
-
-- 当 cell 刚进入运行时：
+鐘舵€佽涔夊浐瀹氫负锛?
+- 鍒氳繘鍏ヨ繍琛岋細
   - `runtime_status = running`
   - `started_at = last_heartbeat`
-- 当 cell 正常完成时：
-  - `runtime_status: running -> complete`
-  - `finished_at` 必须写入
-- 当 cell 运行异常退出时：
+  - `runner_pid` 鍜?`runner_started_at` 蹇呴』鍐欏叆
+- 姝ｅ父瀹屾垚锛?  - `runtime_status: running -> complete`
+  - `finished_at` 鍐欏叆
+  - `process_alive` 鍙负 `0` 鎴栫┖锛屼笉鍙備笌 complete 鍒ゅ畾
+- 寮傚父閫€鍑猴細
   - `runtime_status: running -> failed`
-  - `finished_at` 必须写入
-- `status-only` 必须基于纯磁盘同时输出：
-  - `bundle_completed_progress`
-  - `running_cell_count`
-  - `running / complete / failed / pending` 的 cell 数量
-  - 若存在运行中 cell，则输出其：
-    - `scenario`
-    - `variant_type`
-    - `variant_name`
-    - `heartbeat_age_seconds`
-    - `stalled`
+  - `finished_at` 鍐欏叆
+- 鑻ュ閮?kill 鎴栨墜鍔ㄥ仠姝㈠鑷存棤娉曟樉寮忓啓鍏?`failed`锛?  - 涓嶅己琛屼吉閫?`failed`
+  - 鐢?`status-only` 閫氳繃锛?    - `stalled=true`
+    - `process_alive=false`
+    - `orphaned=true`
+    鏉ユ毚闇测€滃け鑱斾腑鐨?running cell鈥?
+閲嶈 acceptance 绾︽潫缁х画鍥哄畾涓猴細
 
-重要约束：
+- `validate-only` 浠嶇劧鍙兘鎸?`summary.csv` 涓?sealing 缁撴灉鍒ゅ畾
+- 杩愯涓€乻talled銆乷rphaned 鐨?cell 閮?**涓嶈兘** 琚畻鎴?`complete`
+- `primary_safety_valid` 瑙勫垯淇濇寔瀹屽叏涓嶅彉
 
-- `validate-only` 的 acceptance 口径 **不能** 因 heartbeat 而放松
-- 也就是说：
-  - `bundle_complete` 仍然只能由已完成并落盘的 `summary.csv` 决定
-  - 运行中 cell 不能被算成 complete
-
-### 3.5 下一轮测试要求
-
-必须新增并通过以下测试：
-
-- `runtime_state` 文件生成测试：
-  - 启动一个 partial canonical run 时，`run_runtime_state.json` 与 `cell_runtime_state.csv` 必须生成
-- 串行状态机测试：
-  - 任意时刻 `running_cell_count ∈ {0, 1}`
-- heartbeat / stall 判定测试：
-  - `heartbeat_age_seconds > 900` 时，`stalled = true`
-  - 否则 `stalled = false`
-- 幂等性测试：
-  - 对同一磁盘状态重复执行 `--status-only`
-  - `run_progress.json`
-  - `cell_progress.csv`
-  - `run_runtime_state.json`
+### 3.5 涓嬩竴杞祴璇曡姹?
+蹇呴』鏂板骞堕€氳繃浠ヤ笅娴嬭瘯锛?
+- process-aware runtime 瀛楁鐢熸垚娴嬭瘯锛?  - `run_runtime_state.json`
   - `cell_runtime_state.csv`
-  - `matrix_index.csv`
-  - `paper_acceptance.json`
-  数据内容必须稳定一致
-- acceptance 不变性测试：
-  - 即使 runtime state 显示 `running`
-  - 若 `summary.csv` 尚未完整，则 `validate-only` 仍必须失败
+  涓繀椤诲嚭鐜帮細
+  - `runner_pid`
+  - `runner_started_at`
+  - `process_alive`
+  - `orphaned`
+- liveness 鍒ゅ畾娴嬭瘯锛?  - 褰?`runner_pid` 瀵瑰簲杩涚▼瀛樺湪涓斿惎鍔ㄦ椂闂村尮閰嶆椂锛?    - `process_alive = true`
+  - 鍚﹀垯锛?    - `process_alive = false`
+- orphan 鍒ゅ畾娴嬭瘯锛?  - 褰?`runtime_status = running` 涓?`process_alive = false` 鏃讹細
+    - `orphaned = true`
+- stall 涓?orphan 瑙ｈ€︽祴璇曪細
+  - `heartbeat_age_seconds > 900` 鏃讹紝`stalled = true`
+  - `stalled` 涓?`orphaned` 涓嶈兘浜掔浉鏇夸唬
+- `status-only` 绾鐩樺箓绛夋€ф祴璇曪細
+  - 瀵瑰悓涓€ bundle 杩炵画鎵ц涓ゆ `--status-only`
+  - 浠ヤ笅浜х墿鏁版嵁鍐呭蹇呴』涓€鑷达細
+    - `run_progress.json`
+    - `cell_progress.csv`
+    - `run_runtime_state.json`
+    - `cell_runtime_state.csv`
+    - `matrix_index.csv`
+    - `paper_acceptance.json`
+- acceptance 涓嶅彉鎬ф祴璇曪細
+  - 鍗充娇 `runtime_status=running`
+  - 鍗充娇 `process_alive=true`
+  - 鍗充娇 `orphaned=false`
+  - 鑻?`summary.csv` 灏氭湭瀹屾暣锛屽垯 `validate-only` 浠嶅繀椤诲け璐?
+### 3.6 涓嬩竴杞繍琛屼笌楠屾敹椤哄簭
 
-### 3.6 下一轮运行与验收顺序
-
-下一位工程师应按这个顺序继续：
-
-1. 先检查当前 `paper_canonical` 进程是否仍在运行
-2. 若仍在运行，不要删除现有 `outputs/paper_canonical`
-3. 先实现 runtime heartbeat / running-cell journal
-4. 通过以下验证：
-   - `python -m compileall src tests scripts`
+涓嬩竴浣嶅伐绋嬪笀搴旀寜杩欎釜椤哄簭缁х画锛?
+1. 鍏堟鏌ュ綋鍓?`paper_canonical` 鏄惁浠嶅湪杩愯
+2. 鑻ヤ粛鍦ㄨ繍琛岋紝涓嶈鍒犻櫎褰撳墠 `outputs/paper_canonical`
+3. 鍏堝疄鐜?process-aware liveness / orphan reconciliation
+4. 閫氳繃浠ヤ笅楠岃瘉锛?   - `python -m compileall src tests scripts`
    - `python -m pytest -q tests/test_stats_export.py tests/test_reproduce_paper.py`
-5. 然后再继续/恢复正文 canonical：
-   - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
-6. 再执行：
+5. 鐒跺悗缁х画/鎭㈠姝ｆ枃 canonical锛?   - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
+6. 鍐嶆墽琛岋細
    - `python scripts/reproduce_paper.py --exp-id paper_canonical --status-only`
    - `python scripts/reproduce_paper.py --exp-id paper_canonical --validate-only`
 
-最终验收标准仍固定为：
+鏈€缁堥獙鏀舵爣鍑嗕粛鍥哄畾涓猴細
 
-- `outputs/paper_canonical` 存在
-- `run_progress.json` 最终 `bundle_progress = 1.0`
-- `paper_acceptance.json` 中 `bundle_complete = true`
-- `paper_acceptance.json` 中 `primary_safety_valid = true`
-- 所有 expected canonical cells 覆盖 `30` seeds
+- `outputs/paper_canonical` 瀛樺湪
+- `run_progress.json` 鏈€缁?`bundle_progress = 1.0`
+- `paper_acceptance.json` 涓?`bundle_complete = true`
+- `paper_acceptance.json` 涓?`primary_safety_valid = true`
+- 鎵€鏈?expected canonical cells 瑕嗙洊 `30` seeds
 
 ---
 
-## 4. 技术栈红线
+## 4. 鎶€鏈爤绾㈢嚎
 
-以下要求必须继续严格保留，不得被后续工程师破坏：
+浠ヤ笅瑕佹眰蹇呴』缁х画涓ユ牸淇濈暀锛屼笉寰楄鍚庣画宸ョ▼甯堢牬鍧忥細
 
-### 4.1 主架构红线
-
-- 正文主线始终是白盒主链：
+### 4.1 涓绘灦鏋勭孩绾?
+- 姝ｆ枃涓荤嚎濮嬬粓鏄櫧鐩掍富閾撅細
   - `FSM + adaptive_apf + CBF-QP`
-- `paper_canonical` 只服务于 white-box 正文矩阵
-- RL 不得重新升级为当前主线
+- `paper_canonical` 鍙湇鍔′簬 white-box 姝ｆ枃鐭╅樀
+- RL 涓嶅緱閲嶆柊鍗囩骇涓哄綋鍓嶄富绾?
+### 4.2 RL 绾㈢嚎
 
-### 4.2 RL 红线
-
-- RL 仍严格限制为：
-  - `param-only supervisor`
-- 不允许回滚成：
-  - `mode-only RL`
+- RL 浠嶄弗鏍奸檺鍒朵负锛?  - `param-only supervisor`
+- 涓嶅厑璁稿洖婊氭垚锛?  - `mode-only RL`
   - `full supervisor continuous control`
-- 不允许让 RL 直接输出连续控制量
-- 不允许引入 `SB3`
-- `PROMPT_SYSTEM.md` 与 `RESEARCH_GOAL.md` 里保留的旧 `mode-only RL` 理论模板不是当前活契约
+- 涓嶅厑璁歌 RL 鐩存帴杈撳嚭杩炵画鎺у埗閲?- 涓嶅厑璁稿紩鍏?`SB3`
+- `PROMPT_SYSTEM.md` 涓?`RESEARCH_GOAL.md` 閲屼繚鐣欑殑鏃?`mode-only RL` 鐞嗚妯℃澘涓嶆槸褰撳墠娲诲绾?
+### 4.3 鍏叡鎺ュ彛绾㈢嚎
 
-### 4.3 公共接口红线
-
-以下接口不得修改：
-
+浠ヤ笅鎺ュ彛涓嶅緱淇敼锛?
 - `ModeDecision(mode, theta, source, confidence)`
 - `compute_actions(observation, mode, theta=None)`
 
-### 4.4 安全层红线
+### 4.4 瀹夊叏灞傜孩绾?
+- 涓嶅厑璁镐慨鏀?safety red-line 鏂囦欢
+- 涓嶅厑璁镐负浜嗚拷姹傛晥鐜囪€屾斁鏉?CBF-QP 鐨?safety acceptance 鍙ｅ緞
 
-- 不允许修改 safety red-line 文件
-- 不允许为了追求效率而放松 CBF-QP 的 safety acceptance 口径
-
-### 4.5 统计与论文口径红线
-
-- 默认主表统计继续使用 deterministic bootstrap CI
-- `paper_acceptance.json` 必须继续作为正文 artifact 的唯一收口入口
-- paired delta 继续只允许按相同 seed 配对
+### 4.5 缁熻涓庤鏂囧彛寰勭孩绾?
+- 榛樿涓昏〃缁熻缁х画浣跨敤 deterministic bootstrap CI
+- `paper_acceptance.json` 蹇呴』缁х画浣滀负姝ｆ枃 artifact 鐨勫敮涓€鏀跺彛鍏ュ彛
+- paired delta 缁х画鍙厑璁告寜鐩稿悓 seed 閰嶅
 
 ---
 
-## 5. 一句话交接
+## 5. 涓€鍙ヨ瘽浜ゆ帴
 
-当前最重要的事实是：
-
-- manifest-first canonical audit 已经完成
-- `paper_canonical` 正文长跑已经启动
-- RL 线当前不再是主任务
-- 下一位工程师不该再改算法，而应该立刻补 **canonical 长跑的运行态 heartbeat / running-cell journal**，然后继续把 `paper_canonical` 跑到 `bundle_complete = true`
+褰撳墠鏈€閲嶈鐨勪簨瀹炴槸锛?
+- manifest-first canonical audit 宸插畬鎴?- runtime heartbeat / running-cell journal 宸插畬鎴?- `paper_canonical` 褰撳墠姝ｅ湪璺戠涓€涓?cell锛屼絾浠嶆棤浠讳綍 `summary.csv`
+- RL 宸茬粡閫€鍑轰富浠诲姟闃熷垪
+- 涓嬩竴浣嶅伐绋嬪笀涓嶈鍐嶇绠楁硶锛岃€屽簲绔嬪埢琛?**process-aware liveness / orphan reconciliation**锛岀劧鍚庣户缁妸 `paper_canonical` 璺戝埌 `bundle_complete = true`

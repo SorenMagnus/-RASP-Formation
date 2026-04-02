@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
+import threading
+from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -67,6 +71,19 @@ RL_METHOD_SPECS = {
     "rl_mode_only": {"decision_kind": "rl", "checkpoint_arg": "rl_mode_checkpoint"},
     "rl_full_supervisor": {"decision_kind": "rl", "checkpoint_arg": "rl_full_checkpoint"},
 }
+RUNTIME_HEARTBEAT_INTERVAL_SECONDS = 30
+RUNTIME_STALL_TIMEOUT_SECONDS = 900
+RUNTIME_STATUS_PENDING = "pending"
+RUNTIME_STATUS_RUNNING = "running"
+RUNTIME_STATUS_COMPLETE = "complete"
+RUNTIME_STATUS_FAILED = "failed"
+RUNTIME_STATUS_VALUES = {
+    RUNTIME_STATUS_PENDING,
+    RUNTIME_STATUS_RUNNING,
+    RUNTIME_STATUS_COMPLETE,
+    RUNTIME_STATUS_FAILED,
+}
+_RUNTIME_WRITE_LOCK = threading.Lock()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -414,6 +431,314 @@ def _resolve_audit_spec(
     )
 
 
+def _runtime_state_paths(paper_dir: Path) -> tuple[Path, Path]:
+    return (paper_dir / "run_runtime_state.json", paper_dir / "cell_runtime_state.csv")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    rendered = str(value).strip()
+    if not rendered:
+        return None
+    try:
+        return datetime.fromisoformat(rendered.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _runtime_cell_key(payload: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(payload.get("scenario", "")),
+        str(payload.get("method", "")),
+        str(payload.get("variant_type", "")),
+        str(payload.get("variant_name", "")),
+    )
+
+
+def _runtime_sort_key(payload: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(payload.get("scenario", "")),
+        str(payload.get("variant_type", "")),
+        str(payload.get("variant_name", "")),
+        str(payload.get("method", "")),
+    )
+
+
+def _summary_path_for_cell(repo_root: Path, cell: dict[str, object]) -> Path:
+    return repo_root / str(cell["output_dir"]) / "summary.csv"
+
+
+def _normalize_runtime_status(value: object) -> str:
+    rendered = str(value).strip().lower()
+    if rendered in RUNTIME_STATUS_VALUES:
+        return rendered
+    return RUNTIME_STATUS_PENDING
+
+
+def _to_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    rendered = str(value).strip().lower()
+    return rendered in {"1", "true", "yes", "y"}
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_runtime_cell_rows(path: Path) -> dict[str, dict[str, object]]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows: dict[str, dict[str, object]] = {}
+        for row in reader:
+            run_id = str(row.get("run_id", "")).strip()
+            if not run_id:
+                continue
+            rows[run_id] = dict(row)
+        return rows
+
+
+def _runtime_overrides(
+    *,
+    runtime_status: str,
+    now: datetime,
+    reset_started_at: bool = False,
+    finished_at: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "runtime_status": runtime_status,
+        "last_heartbeat": _format_timestamp(now),
+        "heartbeat_age_seconds": 0 if runtime_status == RUNTIME_STATUS_RUNNING else "",
+        "stalled": False,
+    }
+    if reset_started_at:
+        payload["started_at"] = _format_timestamp(now)
+    if finished_at:
+        payload["finished_at"] = _format_timestamp(now)
+    elif runtime_status == RUNTIME_STATUS_RUNNING:
+        payload["finished_at"] = ""
+    return payload
+
+
+def _build_runtime_cell_rows(
+    *,
+    expected_cells: list[dict[str, object]],
+    matrix_index_rows: list[dict[str, object]],
+    previous_rows: dict[str, dict[str, object]],
+    runtime_overrides: dict[str, dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    matrix_index_by_key = {
+        _runtime_cell_key(row): row
+        for row in matrix_index_rows
+        if bool(row.get("expected_cell", True))
+    }
+    overrides = runtime_overrides or {}
+    rows: list[dict[str, object]] = []
+    for expected_cell in sorted(expected_cells, key=_runtime_sort_key):
+        key = _runtime_cell_key(expected_cell)
+        matrix_row = matrix_index_by_key.get(key, {})
+        run_id = str(expected_cell["run_id"])
+        previous = previous_rows.get(run_id, {})
+        completed_seed_count = _to_int(matrix_row.get("actual_seed_count", 0))
+        completed_progress = _to_float(matrix_row.get("progress_ratio", 0.0))
+        expected_seed_count = max(_to_int(matrix_row.get("expected_seed_count", 0)), 0)
+        runtime_status = _normalize_runtime_status(previous.get("runtime_status", RUNTIME_STATUS_PENDING))
+        if _to_bool(matrix_row.get("cell_complete", False)):
+            runtime_status = RUNTIME_STATUS_COMPLETE
+        elif runtime_status not in {RUNTIME_STATUS_RUNNING, RUNTIME_STATUS_FAILED}:
+            runtime_status = RUNTIME_STATUS_PENDING
+
+        row = {
+            "scenario": str(expected_cell.get("scenario", "")),
+            "method": str(expected_cell.get("method", "")),
+            "variant_type": str(expected_cell.get("variant_type", "")),
+            "variant_name": str(expected_cell.get("variant_name", "")),
+            "run_id": run_id,
+            "config_path": str(expected_cell.get("config_path", "")),
+            "output_dir": str(expected_cell.get("output_dir", "")),
+            "expected_seed_count": expected_seed_count,
+            "completed_seed_count": completed_seed_count,
+            "completed_progress": completed_progress,
+            "runtime_status": runtime_status,
+            "started_at": str(previous.get("started_at", "")),
+            "last_heartbeat": str(previous.get("last_heartbeat", "")),
+            "finished_at": str(previous.get("finished_at", "")),
+            "heartbeat_age_seconds": previous.get("heartbeat_age_seconds", ""),
+            "stalled": _to_bool(previous.get("stalled", False)),
+        }
+        if row["runtime_status"] != RUNTIME_STATUS_RUNNING:
+            row["heartbeat_age_seconds"] = ""
+            row["stalled"] = False
+        override = overrides.get(run_id)
+        if override:
+            row.update(override)
+        rows.append(row)
+
+    running_rows = [row for row in rows if row["runtime_status"] == RUNTIME_STATUS_RUNNING]
+    if len(running_rows) > 1:
+        def _running_rank(payload: dict[str, object]) -> tuple[str, str, str]:
+            return (
+                str(payload.get("last_heartbeat", "")),
+                str(payload.get("started_at", "")),
+                str(payload.get("run_id", "")),
+            )
+
+        keep_run_id = max(running_rows, key=_running_rank)["run_id"]
+        for row in rows:
+            if row["runtime_status"] == RUNTIME_STATUS_RUNNING and row["run_id"] != keep_run_id:
+                row["runtime_status"] = RUNTIME_STATUS_FAILED
+                row["heartbeat_age_seconds"] = ""
+                row["stalled"] = False
+    return rows
+
+
+def _summarize_runtime_rows(
+    *,
+    exp_id: str,
+    runtime_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    status_counts = Counter(str(row.get("runtime_status", RUNTIME_STATUS_PENDING)) for row in runtime_rows)
+    expected_seed_total = sum(_to_int(row.get("expected_seed_count", 0)) for row in runtime_rows)
+    completed_seed_total = sum(
+        min(_to_int(row.get("completed_seed_count", 0)), _to_int(row.get("expected_seed_count", 0)))
+        for row in runtime_rows
+    )
+    if expected_seed_total <= 0:
+        bundle_completed_progress = 1.0
+    else:
+        bundle_completed_progress = float(completed_seed_total) / float(expected_seed_total)
+    running_rows = [row for row in runtime_rows if row.get("runtime_status") == RUNTIME_STATUS_RUNNING]
+    active_cell = dict(running_rows[0]) if running_rows else None
+    return {
+        "exp_id": exp_id,
+        "cell_runtime_state_path": "cell_runtime_state.csv",
+        "heartbeat_interval_seconds": RUNTIME_HEARTBEAT_INTERVAL_SECONDS,
+        "stall_timeout_seconds": RUNTIME_STALL_TIMEOUT_SECONDS,
+        "num_expected_cells": len(runtime_rows),
+        "num_pending_cells": status_counts[RUNTIME_STATUS_PENDING],
+        "num_running_cells": status_counts[RUNTIME_STATUS_RUNNING],
+        "num_complete_cells": status_counts[RUNTIME_STATUS_COMPLETE],
+        "num_failed_cells": status_counts[RUNTIME_STATUS_FAILED],
+        "running_cell_count": status_counts[RUNTIME_STATUS_RUNNING],
+        "expected_seed_total": expected_seed_total,
+        "completed_seed_total": completed_seed_total,
+        "bundle_completed_progress": bundle_completed_progress,
+        "active_cell": active_cell,
+    }
+
+
+def _write_runtime_artifacts(
+    *,
+    paper_dir: Path,
+    exp_id: str,
+    expected_cells: list[dict[str, object]],
+    matrix_index_rows: list[dict[str, object]],
+    runtime_overrides: dict[str, dict[str, object]] | None = None,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    run_runtime_path, cell_runtime_path = _runtime_state_paths(paper_dir)
+    with _RUNTIME_WRITE_LOCK:
+        previous_rows = _load_runtime_cell_rows(cell_runtime_path)
+        runtime_rows = _build_runtime_cell_rows(
+            expected_cells=expected_cells,
+            matrix_index_rows=matrix_index_rows,
+            previous_rows=previous_rows,
+            runtime_overrides=runtime_overrides,
+        )
+        runtime_summary = _summarize_runtime_rows(
+            exp_id=exp_id,
+            runtime_rows=runtime_rows,
+        )
+        write_csv_rows(runtime_rows, cell_runtime_path)
+        _write_json(runtime_summary, run_runtime_path)
+    return runtime_rows, runtime_summary
+
+
+def _live_runtime_details(runtime_summary: dict[str, object]) -> dict[str, object] | None:
+    active_cell = runtime_summary.get("active_cell")
+    if not isinstance(active_cell, dict):
+        return None
+    last_heartbeat = _parse_timestamp(active_cell.get("last_heartbeat"))
+    heartbeat_age_seconds: int | None = None
+    stalled = False
+    if last_heartbeat is not None:
+        heartbeat_age_seconds = max(0, int((_utc_now() - last_heartbeat).total_seconds()))
+        stalled = heartbeat_age_seconds > RUNTIME_STALL_TIMEOUT_SECONDS
+    return {
+        "scenario": str(active_cell.get("scenario", "")),
+        "variant_type": str(active_cell.get("variant_type", "")),
+        "variant_name": str(active_cell.get("variant_name", "")),
+        "method": str(active_cell.get("method", "")),
+        "run_id": str(active_cell.get("run_id", "")),
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "stalled": stalled,
+    }
+
+
+def _print_runtime_audit_summary(*, runtime_summary: dict[str, object]) -> None:
+    print(f"bundle_completed_progress={float(runtime_summary['bundle_completed_progress']):.6f}")
+    print(f"running_cell_count={int(runtime_summary['running_cell_count'])}")
+    print(f"num_pending_cells={int(runtime_summary['num_pending_cells'])}")
+    print(f"num_running_cells={int(runtime_summary['num_running_cells'])}")
+    print(f"num_complete_cells={int(runtime_summary['num_complete_cells'])}")
+    print(f"num_failed_cells={int(runtime_summary['num_failed_cells'])}")
+    active_details = _live_runtime_details(runtime_summary)
+    if active_details is None:
+        return
+    print(f"active_cell_scenario={active_details['scenario']}")
+    print(f"active_cell_variant_type={active_details['variant_type']}")
+    print(f"active_cell_variant_name={active_details['variant_name']}")
+    print(f"active_cell_method={active_details['method']}")
+    print(f"active_cell_run_id={active_details['run_id']}")
+    print(f"heartbeat_age_seconds={active_details['heartbeat_age_seconds']}")
+    print(f"stalled={active_details['stalled']}")
+
+
+def _runtime_heartbeat_loop(
+    *,
+    stop_event: threading.Event,
+    paper_dir: Path,
+    exp_id: str,
+    expected_cells: list[dict[str, object]],
+    matrix_index_rows: list[dict[str, object]],
+    run_id: str,
+) -> None:
+    while not stop_event.wait(RUNTIME_HEARTBEAT_INTERVAL_SECONDS):
+        now = _utc_now()
+        _write_runtime_artifacts(
+            paper_dir=paper_dir,
+            exp_id=exp_id,
+            expected_cells=expected_cells,
+            matrix_index_rows=matrix_index_rows,
+            runtime_overrides={
+                run_id: _runtime_overrides(
+                    runtime_status=RUNTIME_STATUS_RUNNING,
+                    now=now,
+                )
+            },
+        )
+
+
 def _infer_unexpected_cell_from_run_id(run_id: str) -> dict[str, object]:
     scenario_name, _, remainder = run_id.partition("__")
     if "__adaptive_apf__" in run_id:
@@ -633,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        _, _, acceptance, progress = _write_sealed_artifacts(
+        _, matrix_index_rows, acceptance, progress = _write_sealed_artifacts(
             repo_root=repo_root,
             paper_dir=paper_dir,
             exp_id=args.exp_id,
@@ -644,11 +969,18 @@ def main(argv: list[str] | None = None) -> int:
             ablations=resolved_ablations,
             expected_cells=resolved_expected_cells,
         )
+        _, runtime_summary = _write_runtime_artifacts(
+            paper_dir=paper_dir,
+            exp_id=args.exp_id,
+            expected_cells=resolved_expected_cells,
+            matrix_index_rows=matrix_index_rows,
+        )
         _print_bundle_audit_summary(
             paper_dir=paper_dir,
             progress=progress,
             acceptance=acceptance,
         )
+        _print_runtime_audit_summary(runtime_summary=runtime_summary)
         if args.validate_only:
             bundle_valid = bool(acceptance["bundle_complete"]) and bool(acceptance["primary_safety_valid"])
             return 0 if bundle_valid else 1
@@ -667,7 +999,7 @@ def main(argv: list[str] | None = None) -> int:
         methods=list(args.methods),
         ablations=list(args.ablations),
     )
-    raw_rows, _, _, _ = _write_sealed_artifacts(
+    raw_rows, matrix_index_rows, _, _ = _write_sealed_artifacts(
         repo_root=repo_root,
         paper_dir=paper_dir,
         exp_id=args.exp_id,
@@ -678,6 +1010,16 @@ def main(argv: list[str] | None = None) -> int:
         ablations=list(args.ablations),
         expected_cells=expected_cells,
     )
+    _write_runtime_artifacts(
+        paper_dir=paper_dir,
+        exp_id=args.exp_id,
+        expected_cells=expected_cells,
+        matrix_index_rows=matrix_index_rows,
+    )
+    expected_cells_by_run_id = {
+        str(cell["run_id"]): cell
+        for cell in expected_cells
+    }
     for scenario_name in args.scenarios:
         scenario_path = _scenario_config_path(repo_root, scenario_name)
         if not scenario_path.exists():
@@ -697,16 +1039,86 @@ def main(argv: list[str] | None = None) -> int:
                 paper_exp_id=args.exp_id,
             )
             run_id = f"{scenario_name}__{method_name}"
-            _run_single_configuration(
-                config_path=config_path,
-                seeds=args.seeds,
-                run_id=run_id,
-                skip_existing=args.skip_existing,
-                decision_kind=decision_kind,
-                rl_checkpoint=rl_checkpoint,
-                deterministic_eval=args.deterministic_eval,
+            expected_cell = expected_cells_by_run_id[run_id]
+            if args.skip_existing and _summary_path_for_cell(repo_root, expected_cell).exists():
+                raw_rows, matrix_index_rows, _, _ = _write_sealed_artifacts(
+                    repo_root=repo_root,
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    canonical_matrix=bool(args.canonical_matrix),
+                    expected_seeds=list(args.seeds),
+                    scenarios=list(args.scenarios),
+                    methods=list(args.methods),
+                    ablations=list(args.ablations),
+                    expected_cells=expected_cells,
+                )
+                _write_runtime_artifacts(
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    expected_cells=expected_cells,
+                    matrix_index_rows=matrix_index_rows,
+                )
+                continue
+
+            start_now = _utc_now()
+            _write_runtime_artifacts(
+                paper_dir=paper_dir,
+                exp_id=args.exp_id,
+                expected_cells=expected_cells,
+                matrix_index_rows=matrix_index_rows,
+                runtime_overrides={
+                    run_id: _runtime_overrides(
+                        runtime_status=RUNTIME_STATUS_RUNNING,
+                        now=start_now,
+                        reset_started_at=True,
+                    )
+                },
             )
-            raw_rows, _, _, _ = _write_sealed_artifacts(
+            stop_event = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=_runtime_heartbeat_loop,
+                kwargs={
+                    "stop_event": stop_event,
+                    "paper_dir": paper_dir,
+                    "exp_id": args.exp_id,
+                    "expected_cells": expected_cells,
+                    "matrix_index_rows": matrix_index_rows,
+                    "run_id": run_id,
+                },
+                daemon=True,
+            )
+            heartbeat_thread.start()
+            try:
+                _run_single_configuration(
+                    config_path=config_path,
+                    seeds=args.seeds,
+                    run_id=run_id,
+                    skip_existing=args.skip_existing,
+                    decision_kind=decision_kind,
+                    rl_checkpoint=rl_checkpoint,
+                    deterministic_eval=args.deterministic_eval,
+                )
+            except Exception:
+                stop_event.set()
+                heartbeat_thread.join(timeout=5.0)
+                failure_now = _utc_now()
+                _write_runtime_artifacts(
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    expected_cells=expected_cells,
+                    matrix_index_rows=matrix_index_rows,
+                    runtime_overrides={
+                        run_id: _runtime_overrides(
+                            runtime_status=RUNTIME_STATUS_FAILED,
+                            now=failure_now,
+                            finished_at=True,
+                        )
+                    },
+                )
+                raise
+            stop_event.set()
+            heartbeat_thread.join(timeout=5.0)
+            raw_rows, matrix_index_rows, _, _ = _write_sealed_artifacts(
                 repo_root=repo_root,
                 paper_dir=paper_dir,
                 exp_id=args.exp_id,
@@ -716,6 +1128,33 @@ def main(argv: list[str] | None = None) -> int:
                 methods=list(args.methods),
                 ablations=list(args.ablations),
                 expected_cells=expected_cells,
+            )
+            matrix_row = next(
+                (
+                    row
+                    for row in matrix_index_rows
+                    if _runtime_cell_key(row) == _runtime_cell_key(expected_cell)
+                ),
+                {},
+            )
+            completed_status = (
+                RUNTIME_STATUS_COMPLETE
+                if _to_bool(matrix_row.get("cell_complete", False))
+                else RUNTIME_STATUS_PENDING
+            )
+            finish_now = _utc_now()
+            _write_runtime_artifacts(
+                paper_dir=paper_dir,
+                exp_id=args.exp_id,
+                expected_cells=expected_cells,
+                matrix_index_rows=matrix_index_rows,
+                runtime_overrides={
+                    run_id: _runtime_overrides(
+                        runtime_status=completed_status,
+                        now=finish_now,
+                        finished_at=True,
+                    )
+                },
             )
         for ablation_name in args.ablations:
             if ablation_name not in ABLATION_CONFIGS:
@@ -730,13 +1169,83 @@ def main(argv: list[str] | None = None) -> int:
                 paper_exp_id=args.exp_id,
             )
             run_id = f"{scenario_name}__{method_label}"
-            _run_single_configuration(
-                config_path=config_path,
-                seeds=args.seeds,
-                run_id=run_id,
-                skip_existing=args.skip_existing,
+            expected_cell = expected_cells_by_run_id[run_id]
+            if args.skip_existing and _summary_path_for_cell(repo_root, expected_cell).exists():
+                raw_rows, matrix_index_rows, _, _ = _write_sealed_artifacts(
+                    repo_root=repo_root,
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    canonical_matrix=bool(args.canonical_matrix),
+                    expected_seeds=list(args.seeds),
+                    scenarios=list(args.scenarios),
+                    methods=list(args.methods),
+                    ablations=list(args.ablations),
+                    expected_cells=expected_cells,
+                )
+                _write_runtime_artifacts(
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    expected_cells=expected_cells,
+                    matrix_index_rows=matrix_index_rows,
+                )
+                continue
+
+            start_now = _utc_now()
+            _write_runtime_artifacts(
+                paper_dir=paper_dir,
+                exp_id=args.exp_id,
+                expected_cells=expected_cells,
+                matrix_index_rows=matrix_index_rows,
+                runtime_overrides={
+                    run_id: _runtime_overrides(
+                        runtime_status=RUNTIME_STATUS_RUNNING,
+                        now=start_now,
+                        reset_started_at=True,
+                    )
+                },
             )
-            raw_rows, _, _, _ = _write_sealed_artifacts(
+            stop_event = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=_runtime_heartbeat_loop,
+                kwargs={
+                    "stop_event": stop_event,
+                    "paper_dir": paper_dir,
+                    "exp_id": args.exp_id,
+                    "expected_cells": expected_cells,
+                    "matrix_index_rows": matrix_index_rows,
+                    "run_id": run_id,
+                },
+                daemon=True,
+            )
+            heartbeat_thread.start()
+            try:
+                _run_single_configuration(
+                    config_path=config_path,
+                    seeds=args.seeds,
+                    run_id=run_id,
+                    skip_existing=args.skip_existing,
+                )
+            except Exception:
+                stop_event.set()
+                heartbeat_thread.join(timeout=5.0)
+                failure_now = _utc_now()
+                _write_runtime_artifacts(
+                    paper_dir=paper_dir,
+                    exp_id=args.exp_id,
+                    expected_cells=expected_cells,
+                    matrix_index_rows=matrix_index_rows,
+                    runtime_overrides={
+                        run_id: _runtime_overrides(
+                            runtime_status=RUNTIME_STATUS_FAILED,
+                            now=failure_now,
+                            finished_at=True,
+                        )
+                    },
+                )
+                raise
+            stop_event.set()
+            heartbeat_thread.join(timeout=5.0)
+            raw_rows, matrix_index_rows, _, _ = _write_sealed_artifacts(
                 repo_root=repo_root,
                 paper_dir=paper_dir,
                 exp_id=args.exp_id,
@@ -746,6 +1255,33 @@ def main(argv: list[str] | None = None) -> int:
                 methods=list(args.methods),
                 ablations=list(args.ablations),
                 expected_cells=expected_cells,
+            )
+            matrix_row = next(
+                (
+                    row
+                    for row in matrix_index_rows
+                    if _runtime_cell_key(row) == _runtime_cell_key(expected_cell)
+                ),
+                {},
+            )
+            completed_status = (
+                RUNTIME_STATUS_COMPLETE
+                if _to_bool(matrix_row.get("cell_complete", False))
+                else RUNTIME_STATUS_PENDING
+            )
+            finish_now = _utc_now()
+            _write_runtime_artifacts(
+                paper_dir=paper_dir,
+                exp_id=args.exp_id,
+                expected_cells=expected_cells,
+                matrix_index_rows=matrix_index_rows,
+                runtime_overrides={
+                    run_id: _runtime_overrides(
+                        runtime_status=completed_status,
+                        now=finish_now,
+                        finished_at=True,
+                    )
+                },
             )
 
     summary_rows = summarize_experiments(

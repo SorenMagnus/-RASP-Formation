@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import csv
 import importlib.util
+import io
 import json
 import shutil
 import uuid
@@ -157,6 +159,32 @@ def _write_manifest(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_runtime_state_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "scenario",
+        "method",
+        "variant_type",
+        "variant_name",
+        "run_id",
+        "config_path",
+        "output_dir",
+        "expected_seed_count",
+        "completed_seed_count",
+        "completed_progress",
+        "runtime_status",
+        "started_at",
+        "last_heartbeat",
+        "finished_at",
+        "heartbeat_age_seconds",
+        "stalled",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def test_reproduce_paper_writes_manifest_index_and_acceptance(tmp_path: Path) -> None:
@@ -626,6 +654,8 @@ def test_reproduce_paper_status_only_is_idempotent_with_manifest() -> None:
             "manifest": (paper_dir / "manifest.json").read_text(encoding="utf-8"),
             "run_progress": (paper_dir / "run_progress.json").read_text(encoding="utf-8"),
             "cell_progress": (paper_dir / "cell_progress.csv").read_text(encoding="utf-8"),
+            "run_runtime_state": (paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"),
+            "cell_runtime_state": (paper_dir / "cell_runtime_state.csv").read_text(encoding="utf-8"),
             "matrix_index": (paper_dir / "matrix_index.csv").read_text(encoding="utf-8"),
             "acceptance": (paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"),
         }
@@ -635,6 +665,8 @@ def test_reproduce_paper_status_only_is_idempotent_with_manifest() -> None:
             "manifest": (paper_dir / "manifest.json").read_text(encoding="utf-8"),
             "run_progress": (paper_dir / "run_progress.json").read_text(encoding="utf-8"),
             "cell_progress": (paper_dir / "cell_progress.csv").read_text(encoding="utf-8"),
+            "run_runtime_state": (paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"),
+            "cell_runtime_state": (paper_dir / "cell_runtime_state.csv").read_text(encoding="utf-8"),
             "matrix_index": (paper_dir / "matrix_index.csv").read_text(encoding="utf-8"),
             "acceptance": (paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"),
         }
@@ -642,5 +674,274 @@ def test_reproduce_paper_status_only_is_idempotent_with_manifest() -> None:
         assert first_exit == 0
         assert second_exit == 0
         assert first_snapshot == second_snapshot
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_writes_runtime_state_files_during_run() -> None:
+    module = _load_module("reproduce_paper_test_runtime_files", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        observed: dict[str, object] = {}
+
+        def fake_run_single_configuration(*, run_id: str, seeds: list[int], **kwargs) -> Path:
+            run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+            cell_runtime = list(
+                csv.DictReader((paper_dir / "cell_runtime_state.csv").open("r", encoding="utf-8"))
+            )
+            observed["run_runtime"] = run_runtime
+            observed["cell_runtime"] = cell_runtime
+            output_dir = paper_dir / "runs" / run_id
+            rows = [
+                _summary_row(seed=seed, config_hash="cfg_no_rl", leader_goal_error=8.0 + 0.5 * seed)
+                for seed in seeds
+            ]
+            _write_summary_csv(output_dir / "summary.csv", rows)
+            return output_dir
+
+        def fake_export(*, output_dir: Path, **kwargs) -> None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "all_runs.csv").write_text("scenario,method\n", encoding="utf-8")
+
+        module._run_single_configuration = fake_run_single_configuration
+        module.export_paper_artifacts = fake_export
+
+        exit_code = module.main(
+            [
+                "--exp-id",
+                exp_id,
+                "--scenarios",
+                "s1_local_minima",
+                "--methods",
+                "no_rl",
+                "--ablations",
+                "--seeds",
+                "0",
+                "1",
+            ]
+        )
+
+        assert exit_code == 0
+        run_runtime = observed["run_runtime"]
+        cell_runtime = observed["cell_runtime"]
+        assert run_runtime["running_cell_count"] == 1
+        assert run_runtime["num_running_cells"] == 1
+        assert run_runtime["num_complete_cells"] == 0
+        assert sum(1 for row in cell_runtime if row["runtime_status"] == "running") == 1
+        active_row = next(row for row in cell_runtime if row["runtime_status"] == "running")
+        assert active_row["run_id"] == "s1_local_minima__no_rl"
+
+        final_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+        assert final_runtime["running_cell_count"] == 0
+        assert final_runtime["num_complete_cells"] == 1
+        assert final_runtime["bundle_completed_progress"] == 1.0
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_status_only_reports_stalled_running_cell() -> None:
+    module = _load_module("reproduce_paper_test_runtime_stalled", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [
+                {
+                    **expected_cells[0],
+                    "expected_seed_count": 2,
+                    "completed_seed_count": 0,
+                    "completed_progress": 0.0,
+                    "runtime_status": "running",
+                    "started_at": "2026-04-01T00:00:00Z",
+                    "last_heartbeat": "2026-04-01T00:00:00Z",
+                    "finished_at": "",
+                    "heartbeat_age_seconds": 0,
+                    "stalled": False,
+                },
+                {
+                    **expected_cells[1],
+                    "expected_seed_count": 2,
+                    "completed_seed_count": 0,
+                    "completed_progress": 0.0,
+                    "runtime_status": "pending",
+                    "started_at": "",
+                    "last_heartbeat": "",
+                    "finished_at": "",
+                    "heartbeat_age_seconds": "",
+                    "stalled": False,
+                },
+            ],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("status-only should not launch experiment runs")
+
+        def fail_export(*args, **kwargs):
+            raise AssertionError("status-only should not export paper artifacts")
+
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = module.main(["--exp-id", exp_id, "--status-only"])
+
+        assert exit_code == 0
+        rendered = stdout.getvalue()
+        assert "running_cell_count=1" in rendered
+        assert "active_cell_run_id=s1_local_minima__no_rl" in rendered
+        assert "stalled=True" in rendered
+
+        run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+        assert run_runtime["running_cell_count"] == 1
+        assert run_runtime["num_pending_cells"] == 1
+        assert run_runtime["num_running_cells"] == 1
+        assert run_runtime["num_complete_cells"] == 0
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_status_only_enforces_single_running_cell() -> None:
+    module = _load_module("reproduce_paper_test_runtime_single_running", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="apf"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [
+                {
+                    **expected_cells[0],
+                    "expected_seed_count": 2,
+                    "completed_seed_count": 0,
+                    "completed_progress": 0.0,
+                    "runtime_status": "running",
+                    "started_at": "2026-04-02T00:00:00Z",
+                    "last_heartbeat": "2026-04-02T00:00:00Z",
+                    "finished_at": "",
+                    "heartbeat_age_seconds": 0,
+                    "stalled": False,
+                },
+                {
+                    **expected_cells[1],
+                    "expected_seed_count": 2,
+                    "completed_seed_count": 0,
+                    "completed_progress": 0.0,
+                    "runtime_status": "running",
+                    "started_at": "2026-04-02T00:01:00Z",
+                    "last_heartbeat": "2026-04-02T00:01:00Z",
+                    "finished_at": "",
+                    "heartbeat_age_seconds": 0,
+                    "stalled": False,
+                },
+            ],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("status-only should not launch experiment runs")
+
+        def fail_export(*args, **kwargs):
+            raise AssertionError("status-only should not export paper artifacts")
+
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        exit_code = module.main(["--exp-id", exp_id, "--status-only"])
+
+        assert exit_code == 0
+        run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+        cell_runtime = list(
+            csv.DictReader((paper_dir / "cell_runtime_state.csv").open("r", encoding="utf-8"))
+        )
+        assert run_runtime["running_cell_count"] == 1
+        assert sum(1 for row in cell_runtime if row["runtime_status"] == "running") == 1
+        assert any(
+            row["run_id"] == "s1_local_minima__apf" and row["runtime_status"] == "running"
+            for row in cell_runtime
+        )
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_reproduce_paper_validate_only_keeps_acceptance_independent_of_runtime_state() -> None:
+    module = _load_module("reproduce_paper_test_runtime_acceptance", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [
+                {
+                    **expected_cells[0],
+                    "expected_seed_count": 2,
+                    "completed_seed_count": 0,
+                    "completed_progress": 0.0,
+                    "runtime_status": "running",
+                    "started_at": "2026-04-01T00:00:00Z",
+                    "last_heartbeat": "2026-04-01T00:00:00Z",
+                    "finished_at": "",
+                    "heartbeat_age_seconds": 0,
+                    "stalled": False,
+                },
+            ],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("validate-only should not launch experiment runs")
+
+        def fail_export(*args, **kwargs):
+            raise AssertionError("validate-only should not export paper artifacts")
+
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        exit_code = module.main(["--exp-id", exp_id, "--validate-only"])
+
+        acceptance = json.loads((paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"))
+        run_progress = json.loads((paper_dir / "run_progress.json").read_text(encoding="utf-8"))
+        run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+
+        assert exit_code == 1
+        assert acceptance["bundle_complete"] is False
+        assert run_progress["bundle_progress"] == 0.0
+        assert run_runtime["running_cell_count"] == 1
     finally:
         shutil.rmtree(paper_dir, ignore_errors=True)
