@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import io
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -180,6 +181,10 @@ def _write_runtime_state_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "finished_at",
         "heartbeat_age_seconds",
         "stalled",
+        "runner_pid",
+        "runner_started_at",
+        "process_alive",
+        "orphaned",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -942,6 +947,291 @@ def test_reproduce_paper_validate_only_keeps_acceptance_independent_of_runtime_s
         assert exit_code == 1
         assert acceptance["bundle_complete"] is False
         assert run_progress["bundle_progress"] == 0.0
+        assert run_runtime["running_cell_count"] == 1
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_runtime_process_fields_present_in_artifacts() -> None:
+    """runtime process field generation: run_runtime_state.json and cell_runtime_state.csv
+    must contain runner_pid, runner_started_at, process_alive, orphaned."""
+    module = _load_module("reproduce_paper_test_process_fields", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        def fake_run_single_configuration(*, run_id: str, seeds: list[int], **kwargs) -> Path:
+            output_dir = paper_dir / "runs" / run_id
+            rows = [
+                _summary_row(seed=seed, config_hash="cfg_no_rl", leader_goal_error=8.0)
+                for seed in seeds
+            ]
+            _write_summary_csv(output_dir / "summary.csv", rows)
+            return output_dir
+
+        def fake_export(*, output_dir: Path, **kwargs) -> None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "all_runs.csv").write_text("scenario,method\n", encoding="utf-8")
+
+        module._run_single_configuration = fake_run_single_configuration
+        module.export_paper_artifacts = fake_export
+
+        exit_code = module.main(
+            [
+                "--exp-id", exp_id,
+                "--scenarios", "s1_local_minima",
+                "--methods", "no_rl",
+                "--ablations",
+                "--seeds", "0",
+            ]
+        )
+        assert exit_code == 0
+
+        run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
+        cell_runtime = list(
+            csv.DictReader((paper_dir / "cell_runtime_state.csv").open("r", encoding="utf-8"))
+        )
+
+        assert len(cell_runtime) == 1
+        row = cell_runtime[0]
+        required_fields = ["runner_pid", "runner_started_at", "process_alive", "orphaned"]
+        for field in required_fields:
+            assert field in row, f"Missing field '{field}' in cell_runtime_state.csv"
+
+        active_cell = run_runtime.get("active_cell")
+        if active_cell is not None:
+            for field in required_fields:
+                assert field in active_cell, f"Missing field '{field}' in run_runtime_state.json active_cell"
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_liveness_own_process_alive() -> None:
+    """liveness test: when PID exists and start time matches, process_alive = true."""
+    module = _load_module("reproduce_paper_test_liveness_alive", "scripts/reproduce_paper.py")
+    my_pid = os.getpid()
+    my_start = module._get_process_start_time(my_pid)
+    assert module._check_process_alive(my_pid, my_start) is True
+
+
+def test_liveness_dead_process_not_alive() -> None:
+    """liveness test: when PID does not exist, process_alive = false."""
+    module = _load_module("reproduce_paper_test_liveness_dead", "scripts/reproduce_paper.py")
+    assert module._check_process_alive(99999999, None) is False
+    assert module._check_process_alive(None, None) is False
+    assert module._check_process_alive(0, None) is False
+
+
+def test_orphan_detection_when_running_but_dead() -> None:
+    """orphan detection: if runtime_status=running and process_alive=false then orphaned=true."""
+    module = _load_module("reproduce_paper_test_orphan_detection", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [{
+                **expected_cells[0],
+                "expected_seed_count": 2,
+                "completed_seed_count": 0,
+                "completed_progress": 0.0,
+                "runtime_status": "running",
+                "started_at": "2026-04-01T00:00:00Z",
+                "last_heartbeat": "2026-04-01T00:00:00Z",
+                "finished_at": "",
+                "heartbeat_age_seconds": 0,
+                "stalled": False,
+                "runner_pid": 99999999,
+                "runner_started_at": "2026-04-01T00:00:00Z",
+                "process_alive": True,
+                "orphaned": False,
+            }],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("status-only should not launch runs")
+        def fail_export(*args, **kwargs):
+            raise AssertionError("status-only should not export")
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = module.main(["--exp-id", exp_id, "--status-only"])
+
+        assert exit_code == 0
+        rendered = stdout.getvalue()
+        assert "orphaned=True" in rendered
+        assert "process_alive=False" in rendered
+
+        cell_runtime = list(
+            csv.DictReader((paper_dir / "cell_runtime_state.csv").open("r", encoding="utf-8"))
+        )
+        running_row = next(r for r in cell_runtime if r["runtime_status"] == "running")
+        assert running_row["orphaned"] == "True"
+        assert running_row["process_alive"] == "False"
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_stall_and_orphan_are_independent_signals() -> None:
+    """stall/orphan decoupling: stalled and orphaned must not be treated as the same signal.
+    A cell can be stalled but not orphaned (if pid is alive but heartbeat expired),
+    or orphaned but not stalled (if pid is dead but heartbeat is recent)."""
+    module = _load_module("reproduce_paper_test_stall_orphan_decoupling", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        # Case: dead pid + stale heartbeat => stalled=True AND orphaned=True
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [{
+                **expected_cells[0],
+                "expected_seed_count": 2,
+                "completed_seed_count": 0,
+                "completed_progress": 0.0,
+                "runtime_status": "running",
+                "started_at": "2026-01-01T00:00:00Z",
+                "last_heartbeat": "2026-01-01T00:00:00Z",
+                "finished_at": "",
+                "heartbeat_age_seconds": 0,
+                "stalled": False,
+                "runner_pid": 99999999,
+                "runner_started_at": "2026-01-01T00:00:00Z",
+                "process_alive": True,
+                "orphaned": False,
+            }],
+        )
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("should not run")
+        def fail_export(*args, **kwargs):
+            raise AssertionError("should not export")
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            module.main(["--exp-id", exp_id, "--status-only"])
+
+        rendered = stdout.getvalue()
+        # Both signals should be true (dead pid + stale heartbeat)
+        assert "stalled=True" in rendered
+        assert "orphaned=True" in rendered
+        # Now test case: alive pid + recent heartbeat => stalled=False, orphaned=False
+        my_pid = os.getpid()
+        my_start = module._get_process_start_time(my_pid)
+        now = module._utc_now()
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [{
+                **expected_cells[0],
+                "expected_seed_count": 2,
+                "completed_seed_count": 0,
+                "completed_progress": 0.0,
+                "runtime_status": "running",
+                "started_at": module._format_timestamp(now),
+                "last_heartbeat": module._format_timestamp(now),
+                "finished_at": "",
+                "heartbeat_age_seconds": 0,
+                "stalled": False,
+                "runner_pid": my_pid,
+                "runner_started_at": module._format_timestamp(my_start) if my_start else module._format_timestamp(now),
+                "process_alive": True,
+                "orphaned": False,
+            }],
+        )
+
+        stdout2 = io.StringIO()
+        with contextlib.redirect_stdout(stdout2):
+            module.main(["--exp-id", exp_id, "--status-only"])
+
+        rendered2 = stdout2.getvalue()
+        assert "stalled=False" in rendered2
+        assert "orphaned=False" in rendered2
+        assert "process_alive=True" in rendered2
+    finally:
+        shutil.rmtree(paper_dir, ignore_errors=True)
+
+
+def test_acceptance_invariance_with_process_liveness_fields() -> None:
+    """acceptance invariance: even if runtime says running, process_alive=true,
+    orphaned=false, if summary.csv is incomplete, validate-only must still fail."""
+    module = _load_module("reproduce_paper_test_acceptance_invariance_liveness", "scripts/reproduce_paper.py")
+    repo_root = Path(__file__).resolve().parents[1]
+    exp_id = f"test_paper_reproduce_{uuid.uuid4().hex}"
+    paper_dir = repo_root / "outputs" / exp_id
+
+    try:
+        expected_cells = [
+            _expected_cell(exp_id=exp_id, scenario="s1_local_minima", method="no_rl"),
+        ]
+        _write_manifest(
+            paper_dir / "manifest.json",
+            exp_id=exp_id,
+            expected_seeds=[0, 1],
+            expected_cells=expected_cells,
+        )
+        my_pid = os.getpid()
+        now = module._utc_now()
+        _write_runtime_state_csv(
+            paper_dir / "cell_runtime_state.csv",
+            [{
+                **expected_cells[0],
+                "expected_seed_count": 2,
+                "completed_seed_count": 0,
+                "completed_progress": 0.0,
+                "runtime_status": "running",
+                "started_at": module._format_timestamp(now),
+                "last_heartbeat": module._format_timestamp(now),
+                "finished_at": "",
+                "heartbeat_age_seconds": 0,
+                "stalled": False,
+                "runner_pid": my_pid,
+                "runner_started_at": module._format_timestamp(now),
+                "process_alive": True,
+                "orphaned": False,
+            }],
+        )
+        # No summary.csv at all
+
+        def fail_run(*args, **kwargs):
+            raise AssertionError("validate-only should not launch runs")
+        def fail_export(*args, **kwargs):
+            raise AssertionError("validate-only should not export")
+        module._run_single_configuration = fail_run
+        module.export_paper_artifacts = fail_export
+
+        exit_code = module.main(["--exp-id", exp_id, "--validate-only"])
+        assert exit_code == 1  # Must fail because no summary.csv
+
+        acceptance = json.loads((paper_dir / "paper_acceptance.json").read_text(encoding="utf-8"))
+        assert acceptance["bundle_complete"] is False
+
+        run_runtime = json.loads((paper_dir / "run_runtime_state.json").read_text(encoding="utf-8"))
         assert run_runtime["running_cell_count"] == 1
     finally:
         shutil.rmtree(paper_dir, ignore_errors=True)

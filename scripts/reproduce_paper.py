@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import sys
 import threading
 from collections import Counter
@@ -73,6 +74,7 @@ RL_METHOD_SPECS = {
 }
 RUNTIME_HEARTBEAT_INTERVAL_SECONDS = 30
 RUNTIME_STALL_TIMEOUT_SECONDS = 900
+RUNTIME_PROCESS_START_TOLERANCE_SECONDS = 5
 RUNTIME_STATUS_PENDING = "pending"
 RUNTIME_STATUS_RUNNING = "running"
 RUNTIME_STATUS_COMPLETE = "complete"
@@ -84,6 +86,96 @@ RUNTIME_STATUS_VALUES = {
     RUNTIME_STATUS_FAILED,
 }
 _RUNTIME_WRITE_LOCK = threading.Lock()
+
+
+def _get_process_start_time(pid: int) -> datetime | None:
+    """Return the UTC start time of the process with the given PID, or None if not found.
+
+    Uses ctypes on Windows (avoids subprocess timeout issues) or ``ps`` on Unix.
+    """
+    if pid <= 0:
+        return None
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            import ctypes.wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return None
+            try:
+                creation = ctypes.wintypes.FILETIME()
+                exit_ft = ctypes.wintypes.FILETIME()
+                kernel_ft = ctypes.wintypes.FILETIME()
+                user_ft = ctypes.wintypes.FILETIME()
+                ok = kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_ft),
+                    ctypes.byref(kernel_ft),
+                    ctypes.byref(user_ft),
+                )
+                if not ok:
+                    return None
+                # FILETIME is 100-ns intervals since 1601-01-01 UTC
+                ft_value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+                # Epoch delta: 1601-01-01 to 1970-01-01 in 100-ns ticks
+                EPOCH_DELTA = 116444736000000000
+                timestamp = (ft_value - EPOCH_DELTA) / 1e7
+                return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            finally:
+                kernel32.CloseHandle(handle)
+        else:
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = result.stdout.strip()
+            if not output:
+                return None
+            return datetime.strptime(output, "%a %b %d %H:%M:%S %Y").replace(
+                tzinfo=timezone.utc
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _check_process_alive(
+    pid: int | None,
+    runner_started_at: datetime | None,
+) -> bool:
+    """Return True if the PID refers to the same live process that was recorded.
+
+    Uses a tolerance of RUNTIME_PROCESS_START_TOLERANCE_SECONDS to account for
+    clock skew between the recording and the OS process table.
+    """
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (OSError, PermissionError):
+        return False
+    if runner_started_at is None:
+        return True
+    actual_start = _get_process_start_time(pid)
+    if actual_start is None:
+        return True
+    delta = abs((actual_start - runner_started_at).total_seconds())
+    return delta <= RUNTIME_PROCESS_START_TOLERANCE_SECONDS
+
+
+def _get_current_process_info() -> tuple[int, datetime]:
+    """Return (pid, start_timestamp) for the current Python process."""
+    pid = os.getpid()
+    start_time = _get_process_start_time(pid)
+    if start_time is None:
+        start_time = _utc_now()
+    return pid, start_time
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -525,6 +617,8 @@ def _runtime_overrides(
     now: datetime,
     reset_started_at: bool = False,
     finished_at: bool = False,
+    runner_pid: int | None = None,
+    runner_started_at: datetime | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "runtime_status": runtime_status,
@@ -538,6 +632,10 @@ def _runtime_overrides(
         payload["finished_at"] = _format_timestamp(now)
     elif runtime_status == RUNTIME_STATUS_RUNNING:
         payload["finished_at"] = ""
+    if runner_pid is not None:
+        payload["runner_pid"] = runner_pid
+    if runner_started_at is not None:
+        payload["runner_started_at"] = _format_timestamp(runner_started_at)
     return payload
 
 
@@ -569,6 +667,10 @@ def _build_runtime_cell_rows(
         elif runtime_status not in {RUNTIME_STATUS_RUNNING, RUNTIME_STATUS_FAILED}:
             runtime_status = RUNTIME_STATUS_PENDING
 
+        prev_runner_pid = _to_int(previous.get("runner_pid", 0))
+        prev_runner_started_at_str = str(previous.get("runner_started_at", ""))
+        prev_runner_started_at = _parse_timestamp(prev_runner_started_at_str)
+
         row = {
             "scenario": str(expected_cell.get("scenario", "")),
             "method": str(expected_cell.get("method", "")),
@@ -586,13 +688,36 @@ def _build_runtime_cell_rows(
             "finished_at": str(previous.get("finished_at", "")),
             "heartbeat_age_seconds": previous.get("heartbeat_age_seconds", ""),
             "stalled": _to_bool(previous.get("stalled", False)),
+            "runner_pid": prev_runner_pid if prev_runner_pid > 0 else "",
+            "runner_started_at": prev_runner_started_at_str,
+            "process_alive": False,
+            "orphaned": False,
         }
         if row["runtime_status"] != RUNTIME_STATUS_RUNNING:
             row["heartbeat_age_seconds"] = ""
             row["stalled"] = False
+            row["process_alive"] = False
+            row["orphaned"] = False
+        else:
+            alive = _check_process_alive(
+                prev_runner_pid if prev_runner_pid > 0 else None,
+                prev_runner_started_at,
+            )
+            row["process_alive"] = alive
+            row["orphaned"] = not alive
         override = overrides.get(run_id)
         if override:
             row.update(override)
+            if "runner_pid" in override or "runner_started_at" in override:
+                new_pid = _to_int(row.get("runner_pid", 0))
+                new_started_at = _parse_timestamp(row.get("runner_started_at"))
+                if row["runtime_status"] == RUNTIME_STATUS_RUNNING:
+                    alive = _check_process_alive(
+                        new_pid if new_pid > 0 else None,
+                        new_started_at,
+                    )
+                    row["process_alive"] = alive
+                    row["orphaned"] = not alive
         rows.append(row)
 
     running_rows = [row for row in rows if row["runtime_status"] == RUNTIME_STATUS_RUNNING]
@@ -610,6 +735,8 @@ def _build_runtime_cell_rows(
                 row["runtime_status"] = RUNTIME_STATUS_FAILED
                 row["heartbeat_age_seconds"] = ""
                 row["stalled"] = False
+                row["process_alive"] = False
+                row["orphaned"] = False
     return rows
 
 
@@ -684,6 +811,13 @@ def _live_runtime_details(runtime_summary: dict[str, object]) -> dict[str, objec
     if last_heartbeat is not None:
         heartbeat_age_seconds = max(0, int((_utc_now() - last_heartbeat).total_seconds()))
         stalled = heartbeat_age_seconds > RUNTIME_STALL_TIMEOUT_SECONDS
+    runner_pid = _to_int(active_cell.get("runner_pid", 0))
+    runner_started_at = _parse_timestamp(active_cell.get("runner_started_at"))
+    process_alive = _check_process_alive(
+        runner_pid if runner_pid > 0 else None,
+        runner_started_at,
+    )
+    orphaned = not process_alive
     return {
         "scenario": str(active_cell.get("scenario", "")),
         "variant_type": str(active_cell.get("variant_type", "")),
@@ -692,6 +826,9 @@ def _live_runtime_details(runtime_summary: dict[str, object]) -> dict[str, objec
         "run_id": str(active_cell.get("run_id", "")),
         "heartbeat_age_seconds": heartbeat_age_seconds,
         "stalled": stalled,
+        "runner_pid": runner_pid if runner_pid > 0 else None,
+        "process_alive": process_alive,
+        "orphaned": orphaned,
     }
 
 
@@ -712,6 +849,9 @@ def _print_runtime_audit_summary(*, runtime_summary: dict[str, object]) -> None:
     print(f"active_cell_run_id={active_details['run_id']}")
     print(f"heartbeat_age_seconds={active_details['heartbeat_age_seconds']}")
     print(f"stalled={active_details['stalled']}")
+    print(f"runner_pid={active_details['runner_pid']}")
+    print(f"process_alive={active_details['process_alive']}")
+    print(f"orphaned={active_details['orphaned']}")
 
 
 def _runtime_heartbeat_loop(
@@ -722,6 +862,8 @@ def _runtime_heartbeat_loop(
     expected_cells: list[dict[str, object]],
     matrix_index_rows: list[dict[str, object]],
     run_id: str,
+    runner_pid: int,
+    runner_started_at: datetime,
 ) -> None:
     while not stop_event.wait(RUNTIME_HEARTBEAT_INTERVAL_SECONDS):
         now = _utc_now()
@@ -734,6 +876,8 @@ def _runtime_heartbeat_loop(
                 run_id: _runtime_overrides(
                     runtime_status=RUNTIME_STATUS_RUNNING,
                     now=now,
+                    runner_pid=runner_pid,
+                    runner_started_at=runner_started_at,
                 )
             },
         )
@@ -1061,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             start_now = _utc_now()
+            current_pid, current_pid_start = _get_current_process_info()
             _write_runtime_artifacts(
                 paper_dir=paper_dir,
                 exp_id=args.exp_id,
@@ -1071,6 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
                         runtime_status=RUNTIME_STATUS_RUNNING,
                         now=start_now,
                         reset_started_at=True,
+                        runner_pid=current_pid,
+                        runner_started_at=current_pid_start,
                     )
                 },
             )
@@ -1084,6 +1231,8 @@ def main(argv: list[str] | None = None) -> int:
                     "expected_cells": expected_cells,
                     "matrix_index_rows": matrix_index_rows,
                     "run_id": run_id,
+                    "runner_pid": current_pid,
+                    "runner_started_at": current_pid_start,
                 },
                 daemon=True,
             )
@@ -1191,6 +1340,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             start_now = _utc_now()
+            current_pid, current_pid_start = _get_current_process_info()
             _write_runtime_artifacts(
                 paper_dir=paper_dir,
                 exp_id=args.exp_id,
@@ -1201,6 +1351,8 @@ def main(argv: list[str] | None = None) -> int:
                         runtime_status=RUNTIME_STATUS_RUNNING,
                         now=start_now,
                         reset_started_at=True,
+                        runner_pid=current_pid,
+                        runner_started_at=current_pid_start,
                     )
                 },
             )
@@ -1214,6 +1366,8 @@ def main(argv: list[str] | None = None) -> int:
                     "expected_cells": expected_cells,
                     "matrix_index_rows": matrix_index_rows,
                     "run_id": run_id,
+                    "runner_pid": current_pid,
+                    "runner_started_at": current_pid_start,
                 },
                 daemon=True,
             )

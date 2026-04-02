@@ -1,0 +1,8 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.2, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\27363\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\27363\Desktop\论文级代码
+configfile: pyproject.toml
+plugins: anyio-4.12.1
+collecting ... collected 18 items
+
