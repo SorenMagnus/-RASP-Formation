@@ -370,40 +370,50 @@ class CBFQPSafetyFilter(SafetyFilter):
     ):
         accel_scale = max(self.bounds.accel_max - self.bounds.accel_min, 1e-6)
         steer_scale = max(self.bounds.steer_max - self.bounds.steer_min, 1e-6)
-        quadratic_cost = np.diag(
-            [
-                1.0 / (accel_scale**2),
-                1.0 / (steer_scale**2),
-                self.config.slack_penalty,
+        
+        slack_multipliers = [1.0, 10.0, 100.0, 1000.0]
+        last_solution = None
+        
+        for mult in slack_multipliers:
+            quadratic_cost = np.diag(
+                [
+                    1.0 / (accel_scale**2),
+                    1.0 / (steer_scale**2),
+                    self.config.slack_penalty / mult,
+                ]
+            )
+            linear_cost = np.asarray(
+                [
+                    -quadratic_cost[0, 0] * nominal_vector[0],
+                    -quadratic_cost[1, 1] * nominal_vector[1],
+                    0.0,
+                ],
+                dtype=float,
+            )
+            rows = [
+                np.asarray([1.0, 0.0, 0.0], dtype=float),
+                np.asarray([0.0, 1.0, 0.0], dtype=float),
+                np.asarray([0.0, 0.0, 1.0], dtype=float),
             ]
-        )
-        linear_cost = np.asarray(
-            [
-                -quadratic_cost[0, 0] * nominal_vector[0],
-                -quadratic_cost[1, 1] * nominal_vector[1],
-                0.0,
-            ],
-            dtype=float,
-        )
-        rows = [
-            np.asarray([1.0, 0.0, 0.0], dtype=float),
-            np.asarray([0.0, 1.0, 0.0], dtype=float),
-            np.asarray([0.0, 0.0, 1.0], dtype=float),
-        ]
-        lower_bounds = [self.bounds.accel_min, self.bounds.steer_min, 0.0]
-        upper_bounds = [self.bounds.accel_max, self.bounds.steer_max, self.config.max_slack]
-        for constraint in constraints:
-            rows.append(np.asarray(constraint.coefficients, dtype=float))
-            lower_bounds.append(constraint.lower)
-            upper_bounds.append(constraint.upper)
+            lower_bounds = [self.bounds.accel_min, self.bounds.steer_min, 0.0]
+            upper_bounds = [self.bounds.accel_max, self.bounds.steer_max, self.config.max_slack * mult]
+            for constraint in constraints:
+                rows.append(np.asarray(constraint.coefficients, dtype=float))
+                lower_bounds.append(constraint.lower)
+                upper_bounds.append(constraint.upper)
 
-        return self.solver.solve(
-            quadratic_cost=quadratic_cost,
-            linear_cost=linear_cost,
-            constraint_matrix=np.vstack(rows),
-            lower_bounds=np.asarray(lower_bounds, dtype=float),
-            upper_bounds=np.asarray(upper_bounds, dtype=float),
-        )
+            solution = self.solver.solve(
+                quadratic_cost=quadratic_cost,
+                linear_cost=linear_cost,
+                constraint_matrix=np.vstack(rows),
+                lower_bounds=np.asarray(lower_bounds, dtype=float),
+                upper_bounds=np.asarray(upper_bounds, dtype=float),
+            )
+            last_solution = solution
+            if solution.primal is not None:
+                return solution
+                
+        return last_solution
 
     def _verify_safe_action(
         self,

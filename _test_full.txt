@@ -1,0 +1,36 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.2, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\27363\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: c:\Users\27363\Desktop\论文级代码
+configfile: pyproject.toml
+plugins: anyio-4.12.1
+collecting ... collected 26 items
+
+tests/test_reproduce_paper.py::test_reproduce_paper_writes_manifest_index_and_acceptance PASSED [  3%]
+tests/test_reproduce_paper.py::test_reproduce_paper_marks_incomplete_bundle PASSED [  7%]
+tests/test_reproduce_paper.py::test_reproduce_paper_skip_existing_restores_progress_from_disk PASSED [ 11%]
+tests/test_reproduce_paper.py::test_reproduce_paper_status_only_refreshes_bundle_from_disk PASSED [ 15%]
+tests/test_reproduce_paper.py::test_reproduce_paper_validate_only_returns_nonzero_for_incomplete_bundle PASSED [ 19%]
+tests/test_reproduce_paper.py::test_reproduce_paper_validate_only_returns_zero_for_complete_bundle PASSED [ 23%]
+tests/test_reproduce_paper.py::test_reproduce_paper_audit_requires_manifest_or_canonical_matrix PASSED [ 26%]
+tests/test_reproduce_paper.py::test_reproduce_paper_status_only_is_idempotent_with_manifest PASSED [ 30%]
+tests/test_reproduce_paper.py::test_reproduce_paper_writes_runtime_state_files_during_run PASSED [ 34%]
+tests/test_reproduce_paper.py::test_reproduce_paper_status_only_reports_stalled_running_cell PASSED [ 38%]
+tests/test_reproduce_paper.py::test_reproduce_paper_status_only_enforces_single_running_cell PASSED [ 42%]
+tests/test_reproduce_paper.py::test_reproduce_paper_validate_only_keeps_acceptance_independent_of_runtime_state PASSED [ 46%]
+tests/test_reproduce_paper.py::test_runtime_process_fields_present_in_artifacts PASSED [ 50%]
+tests/test_reproduce_paper.py::test_liveness_own_process_alive PASSED    [ 53%]
+tests/test_reproduce_paper.py::test_liveness_dead_process_not_alive PASSED [ 57%]
+tests/test_reproduce_paper.py::test_orphan_detection_when_running_but_dead PASSED [ 61%]
+tests/test_reproduce_paper.py::test_stall_and_orphan_are_independent_signals PASSED [ 65%]
+tests/test_reproduce_paper.py::test_acceptance_invariance_with_process_liveness_fields PASSED [ 69%]
+tests/test_stats_export.py::test_aggregate_metric_returns_mean_and_ci PASSED [ 73%]
+tests/test_stats_export.py::test_aggregate_metric_constant_values_collapse_ci PASSED [ 76%]
+tests/test_stats_export.py::test_aggregate_metric_with_t_interval_is_supported PASSED [ 80%]
+tests/test_stats_export.py::test_summarize_and_pairwise_comparison_generate_rows PASSED [ 84%]
+tests/test_stats_export.py::test_pairwise_comparison_handles_identical_constant_samples PASSED [ 88%]
+tests/test_stats_export.py::test_pairwise_comparison_reports_paired_seed_statistics PASSED [ 92%]
+tests/test_stats_export.py::test_export_paper_artifacts_writes_tables_and_figures PASSED [ 96%]
+tests/test_stats_export.py::test_validate_canonical_bundle_reports_missing_seeds_and_hash_mismatch PASSED [100%]
+
+============================= 26 passed in 2.59s ==============================

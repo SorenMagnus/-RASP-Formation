@@ -52,10 +52,11 @@ class OSQPQPSolver:
             l=lower_bounds,
             u=upper_bounds,
             verbose=False,
-            polishing=False,
-            adaptive_rho=False,
-            eps_abs=1e-7,
-            eps_rel=1e-7,
+            polishing=True,
+            adaptive_rho=True,
+            adaptive_rho_interval=25,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
             max_iter=20_000,
         )
         result = solver.solve(raise_error=False)
