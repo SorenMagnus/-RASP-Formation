@@ -17,13 +17,15 @@
     - `tests/test_reproduce_paper.py`
   - 本文件重写后，`AI_MEMORY.md` 也会进入 modified 状态
 - 当前后台进程：
-  - 当前有一个正在运行的正文 canonical 长跑：
+  - 当前没有活动中的 `reproduce_paper.py`
+  - 今天曾启动过一条正文 canonical 长跑，但已被人工停止：
     - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
-  - 当前观察到的运行日志：
+  - 当前保留的运行日志：
     - `outputs/paper_canonical_run_stdout.log`
     - `outputs/paper_canonical_run_stderr.log`
   - `stdout` 目前仍为空
-  - `stderr` 目前只有 CBF-QP / fallback 警告，没有看到致命 traceback
+  - `stderr` 最后更新时间停在 `2026-04-02 00:25:21`
+  - 截至停止前，只看到 CBF-QP / fallback 警告，没有看到致命 traceback
 - 当前正文 artifact 游标：
   - `outputs/paper_canonical` 已经创建
   - 当前已存在这些 bundle 产物：
@@ -41,6 +43,7 @@
     - `outputs/paper_canonical/generated_configs/s1_local_minima__method__no_rl.yaml`
     - `outputs/paper_canonical/runs/s1_local_minima__no_rl/`
   - 该 cell 当前尚未落盘 `summary.csv`
+  - 当前 partial bundle 必须保留，后续应在其基础上恢复，而不是删目录重来
 - 当前正文主线：
   - 正文主方法仍然是白盒主链：`FSM + adaptive_apf + CBF-QP`
   - `paper_canonical` 只应包含 white-box 正文矩阵
@@ -138,7 +141,7 @@
   - 本轮没有 fresh rerun 完整 `python -m pytest -q`
   - 因此不要宣称“本轮 full-suite fresh rerun 全绿”
 
-### 1.4 本轮真实运行状态：`paper_canonical` 已正式启动
+### 1.4 本轮真实运行状态：`paper_canonical` 已启动并被人工停止
 
 - 已正式启动正文 canonical 长跑：
   - `python scripts/reproduce_paper.py --exp-id paper_canonical --canonical-matrix --skip-existing`
@@ -158,6 +161,8 @@
   - 第一个 cell `s1_local_minima__no_rl` 已创建 output 目录
   - 但还没有任何一个 `summary.csv` 真正落盘
   - 因此 `bundle_progress` 仍为 `0.0`
+  - 这条长跑现已被人工停止，不再活动
+  - 当前磁盘状态应视为“可恢复的 partial canonical bundle”，不是“正在运行中的 active bundle”
 
 ---
 
@@ -202,7 +207,8 @@
 - 不要再改 warm-start 公式
 - 不要再把 RL 当成当前主任务
 - 不要重复重写 manifest-first audit
-- 不要删除当前正在运行的 `outputs/paper_canonical`
+- 不要删除现有 `outputs/paper_canonical`
+- 不要假设 `paper_canonical` 仍在后台运行
 
 下一条立即执行的代码任务，应围绕 **white-box canonical 长跑的运行态 heartbeat / running-cell journal** 展开。
 
