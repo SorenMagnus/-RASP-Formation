@@ -7,6 +7,9 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -1021,6 +1024,33 @@ def test_liveness_dead_process_not_alive() -> None:
     assert module._check_process_alive(99999999, None) is False
     assert module._check_process_alive(None, None) is False
     assert module._check_process_alive(0, None) is False
+
+
+def test_liveness_detached_child_process_alive() -> None:
+    """liveness test: a detached child process should still be recognized as alive.
+
+    This guards the Windows-specific case where ``os.kill(pid, 0)`` can fail for a
+    live child created in a new process group.
+    """
+    module = _load_module("reproduce_paper_test_liveness_detached", "scripts/reproduce_paper.py")
+    creationflags = 0
+    creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        creationflags=creationflags,
+    )
+    try:
+        time.sleep(0.3)
+        child_start = module._get_process_start_time(child.pid)
+        assert module._check_process_alive(child.pid, child_start) is True
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
 
 
 def test_orphan_detection_when_running_but_dead() -> None:
